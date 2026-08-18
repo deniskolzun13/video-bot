@@ -2,6 +2,7 @@ import asyncio
 import io
 import logging
 import time
+import uuid
 from pathlib import Path
 
 from aiogram import BaseMiddleware, Bot, Dispatcher, F
@@ -23,7 +24,7 @@ logger = logging.getLogger(__name__)
 
 bot = Bot(token=config.TELEGRAM_BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
 dp = Dispatcher()
-semaphore = asyncio.Semaphore(config.BOT_CONCURRENCY)
+semaphore = asyncio.Semaphore(config.RENDER_CONCURRENCY)
 
 
 class AccessMiddleware(BaseMiddleware):
@@ -109,11 +110,15 @@ async def _handle(message: Message, text: str) -> None:
             logger.info("[user %s] %s", message.from_user.id, status)
             await message.answer(status)
 
+        # Уникальный task_id для изоляции параллельных задач
+        task_id = uuid.uuid4().hex[:8]
+
         try:
             videos = await process_text(
                 text,
-                work_dir=Path(config.WORK_DIR) / f"{message.from_user.id}_{int(time.time())}",
+                work_dir=Path(config.WORK_DIR) / f"{message.from_user.id}_{task_id}",
                 notify=notify,
+                task_id=task_id,
             )
             for i, video in enumerate(videos, 1):
                 caption = "🎬 Готово! Видео к публикации." if len(videos) == 1 else f"🎬 Часть {i}/{len(videos)}"

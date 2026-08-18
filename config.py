@@ -45,6 +45,9 @@ CACHE_DIR = getenv("CACHE_DIR", "cache")
 CACHE_TTL_DAYS = int(getenv("CACHE_TTL_DAYS", "7"))
 MAX_CACHE_SIZE_MB = int(getenv("MAX_CACHE_SIZE_MB", "500"))
 
+# Параллельный рендер
+RENDER_CONCURRENCY = int(getenv("RENDER_CONCURRENCY", "2"))
+
 # Как приводить клипы к 9:16: blur — размытая подложка по бокам (видно весь кадр,
 # для трейлеров 16:9), crop — жёсткая обрезка по центру
 VIDEO_PADDING = getenv("VIDEO_PADDING", "blur")

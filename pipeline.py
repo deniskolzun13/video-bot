@@ -1,6 +1,7 @@
 import asyncio
 import logging
 import time
+import uuid
 from pathlib import Path
 from typing import Awaitable, Callable
 
@@ -63,9 +64,12 @@ async def process_text(
     text: str,
     work_dir: Path | str,
     notify: StatusCallback,
+    task_id: str | None = None,
 ) -> list[Path]:
     """Полный пайплайн: озвучка -> тайминг -> клипы -> рендер.
-    Возвращает список готовых mp4 (текст может быть разбит на несколько роликов)."""
+    Возвращает список готовых mp4 (текст может быть разбит на несколько роликов).
+    task_id используется для изоляции временных файлов при параллельном запуске.
+    """
     text = text.strip()
     if not text:
         raise ValueError("Пустой текст")
@@ -81,7 +85,9 @@ async def process_text(
     root = Path(work_dir)
     videos: list[Path] = []
     for index, part in enumerate(parts):
-        wd = root / f"part_{index}"
+        # Уникальный task_id для изоляции параллельных задач
+        part_task_id = task_id or uuid.uuid4().hex[:8]
+        wd = root / f"{part_task_id}_part_{index}"
         wd.mkdir(parents=True, exist_ok=True)
 
         await notify(f"🎧 Озвучиваю ({index + 1}/{len(parts)})…")
