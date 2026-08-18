@@ -14,6 +14,8 @@ logger = logging.getLogger(__name__)
 
 TTS_URL = "https://tts.api.cloud.yandex.net/speech/v1/tts:synthesize"
 ASR_URL = "https://stt.api.cloud.yandex.net/speech/v1/stt:recognize"
+ASR_V3_URL = "https://stt.api.cloud.yandex.net/stt/v3/recognizeFileAsync"
+ASR_V3_RESULT_URL = "https://stt.api.cloud.yandex.net/stt/v3/getRecognition"
 
 
 class TTSError(Exception):
@@ -39,74 +41,89 @@ def _auth_headers() -> dict[str, str]:
     raise TTSError("Не настроен Yandex SpeechKit: отсутствует API-ключ или IAM-токен")
 
 
-async def get_word_timestamps(audio_path: Path, text: str) -> list[dict] | None:
-    """Получение word-level timestamps через Yandex SpeechKit Speech Recognition API.
+async def get_word_timestamps(audio_path: Path, text: str = "") -> list[dict] | None:
+    """Получение word-level timestamps через Yandex SpeechKit API v3 (async recognition).
     Используется для точного тайминга субтитров.
-    Возвращает список {'word': str, 'start': float, 'end': float} или None при ошибке."""
+    Возвращает список {'word': str, 'start': float, 'end': float} или None при ошибке.
+    Параметр text сохранён для совместимости вызовов (API его не принимает)."""
     if not config.YANDEX_FOLDER_ID:
         logger.warning("YANDEX_FOLDER_ID не задан, нельзя получить word-level timestamps")
         return None
 
-    # Конвертируем mp3 в WAV (16kHz mono PCM) для Yandex SpeechKit ASR через ffmpeg
-    wav_path = audio_path.with_suffix(".wav")
+    # Конвертируем mp3 в сырой LPCM (16kHz mono s16le) для Yandex SpeechKit ASR v3
+    pcm_path = audio_path.with_suffix(".pcm16k")
     cmd = [
         "ffmpeg", "-y", "-v", "quiet",
         "-i", str(audio_path),
         "-ar", "16000", "-ac", "1",
         "-c:a", "pcm_s16le",
-        str(wav_path),
+        "-f", "s16le",
+        str(pcm_path),
     ]
     result = await asyncio.to_thread(subprocess.run, cmd, capture_output=True)
     if result.returncode != 0:
-        logger.warning("Не удалось конвертировать аудио в WAV для ASR: %s", result.stderr.decode()[:200])
+        logger.warning("Не удалось конвертировать аудио в PCM для ASR: %s", result.stderr.decode()[:200])
         return None
 
     try:
-        audio_data = wav_path.read_bytes()
+        audio_data = pcm_path.read_bytes()
     except Exception as exc:
-        logger.warning("Не удалось прочитать WAV-файл: %s", exc)
+        logger.warning("Не удалось прочитать PCM-файл: %s", exc)
         return None
     finally:
         try:
-            wav_path.unlink(missing_ok=True)
+            pcm_path.unlink(missing_ok=True)
         except Exception:
             pass
 
-    params = {
-        "folderId": config.YANDEX_FOLDER_ID,
-        "lang": config.TTS_LANG.replace("-", "_").lower(),
-    }
-    if text:
-        params["text"] = text  # использовать как эталон для лучшего распознавания
-
     headers = _auth_headers()
-    headers["Content-Type"] = "audio/wav"
+    headers["x-folder-id"] = config.YANDEX_FOLDER_ID
+
+    import base64
+    body = {
+        "content": base64.b64encode(audio_data).decode(),
+        "recognitionModel": {
+            "model": "general",
+            "audioFormat": {
+                "rawAudio": {
+                    "audioEncoding": "LINEAR16_PCM",
+                    "sampleRateHertz": "16000",
+                    "audioChannelCount": "1",
+                }
+            },
+            "languageRestriction": {
+                "restrictionType": "WHITELIST",
+                "languageCode": [config.TTS_LANG],
+            },
+        },
+    }
 
     try:
         async with httpx.AsyncClient(timeout=120) as client:
-            response = await client.post(
-                ASR_URL,
-                params=params,
-                headers=headers,
-                content=audio_data,
-            )
-        if response.status_code != 200:
-            logger.warning("Yandex ASR вернул %d, word-level timestamps недоступны", response.status_code)
-            return None
+            response = await client.post(ASR_V3_URL, json=body, headers=headers)
+            if response.status_code != 200:
+                logger.warning("Yandex ASR v3 вернул %d, word-level timestamps недоступны", response.status_code)
+                return None
 
-        result = response.json()
-        words: list[dict] = []
-        for hyp in result.get("hypotheses", []):
-            if hyp.get("confidence", 0) < 0.5:
-                continue
-            for w in hyp.get("words", []):
-                words.append({
-                    "word": w.get("word", "").strip(),
-                    "start": w.get("start", 0.0),
-                    "end": w.get("end", 0.0),
-                })
-            if words:
-                break
+            operation_id = response.json().get("id")
+            if not operation_id:
+                logger.warning("Yandex ASR v3 не вернул id операции")
+                return None
+
+            words: list[dict] = []
+            for _ in range(60):  # до ~120 сек (по 2 сек на попытку)
+                await asyncio.sleep(2)
+                res = await client.get(
+                    ASR_V3_RESULT_URL,
+                    params={"operation_id": operation_id},
+                    headers=headers,
+                )
+                if res.status_code != 200:
+                    logger.warning("Yandex ASR v3 getRecognition вернул %d, прерываю ожидание", res.status_code)
+                    return None
+                words = _parse_asr_v3_result(res.text)
+                if words:
+                    break
 
         if not words:
             logger.warning("Yandex ASR не вернул слова для word-level timestamps")
@@ -117,6 +134,32 @@ async def get_word_timestamps(audio_path: Path, text: str) -> list[dict] | None:
     except Exception as exc:
         logger.warning("Ошибка получения word-level timestamps: %s", exc)
         return None
+
+
+def _parse_asr_v3_result(raw: str) -> list[dict]:
+    """Разбор потокового ответа ASR v3 (NDJSON): собираем слова из final-чанков."""
+    words: list[dict] = []
+    for line in raw.strip().splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            obj = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        result = obj.get("result") or {}
+        final = result.get("final") or {}
+        for alt in final.get("alternatives", []):
+            for w in alt.get("words", []):
+                text_w = (w.get("text") or "").strip()
+                if not text_w:
+                    continue
+                words.append({
+                    "word": text_w,
+                    "start": int(w.get("startTimeMs", 0)) / 1000.0,
+                    "end": int(w.get("endTimeMs", 0)) / 1000.0,
+                })
+    return words
 
 
 def split_into_chunks(text: str, limit: int = config.TTS_MAX_CHUNK) -> list[str]:
