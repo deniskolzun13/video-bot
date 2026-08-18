@@ -114,6 +114,13 @@ async def process_text(
                 f"{config.MAX_VIDEO_DURATION:.0f} с. Сократи текст."
             )
 
+        # Warn if video is longer than optimal for engagement (Shorts/Reels)
+        if duration > config.VIDEO_DURATION_WARN_THRESHOLD:
+            await notify(
+                f"⚠️ Ролик получился длинным ({duration:.0f} сек). "
+                f"Для Shorts/Reels лучше 20–40 сек — рекомендуем сократить текст."
+            )
+
         await notify("✂️ Разбиваю на фразы и считаю тайминг…")
         phrases = split_into_phrases(part)
         # 1. Word-level timestamps from Yandex ASR (most accurate)

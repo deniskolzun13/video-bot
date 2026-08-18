@@ -75,6 +75,8 @@ FPS = 30
 MAX_VIDEO_DURATION = float(getenv("MAX_VIDEO_DURATION", "75"))
 MAX_VIDEO_SYMBOLS = int(getenv("MAX_VIDEO_SYMBOLS", "3500"))
 MAX_PARTS = int(getenv("MAX_PARTS", "4"))
+# Порог для предупреждения о длинном ролике (для удержания attention)
+VIDEO_DURATION_WARN_THRESHOLD = float(getenv("VIDEO_DURATION_WARN_THRESHOLD", "45"))
 
 KEYWORDS_COUNT = int(getenv("KEYWORDS_COUNT", "4"))
 
