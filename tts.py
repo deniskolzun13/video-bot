@@ -15,12 +15,27 @@ logger = logging.getLogger(__name__)
 TTS_URL = "https://tts.api.cloud.yandex.net/speech/v1/tts:synthesize"
 
 
+class TTSError(Exception):
+    """Ошибка синтеза речи — сообщение для пользователя."""
+    def __init__(self, message: str, details: str = ""):
+        super().__init__(message)
+        self.details = details
+
+
+class APIError(Exception):
+    """Общая ошибка внешнего API."""
+    def __init__(self, service: str, message: str, status_code: int = 0):
+        super().__init__(message)
+        self.service = service
+        self.status_code = status_code
+
+
 def _auth_headers() -> dict[str, str]:
     if config.YANDEX_API_KEY:
         return {"Authorization": f"Api-Key {config.YANDEX_API_KEY}"}
     if config.YANDEX_IAM_TOKEN:
         return {"Authorization": f"Bearer {config.YANDEX_IAM_TOKEN}"}
-    raise ValueError("Задай YANDEX_API_KEY или YANDEX_IAM_TOKEN в .env")
+    raise TTSError("Не настроен Yandex SpeechKit: отсутствует API-ключ или IAM-токен")
 
 
 def split_into_chunks(text: str, limit: int = config.TTS_MAX_CHUNK) -> list[str]:
@@ -59,8 +74,10 @@ async def _synthesize_chunk(client: httpx.AsyncClient, chunk: str, dest: Path) -
         params["folderId"] = config.YANDEX_FOLDER_ID
     response = await client.post(TTS_URL, params=params, headers=_auth_headers())
     if response.status_code != 200:
-        raise ValueError(
-            f"Yandex SpeechKit вернул ошибку {response.status_code}: {response.text[:300]}"
+        raise APIError(
+            "Yandex SpeechKit",
+            f"Ошибка синтеза речи: {response.status_code}",
+            response.status_code,
         )
     dest.write_bytes(response.content)
 
@@ -75,7 +92,10 @@ async def synthesize(text: str, work_dir: Path) -> tuple[Path, float]:
         for i, chunk in enumerate(chunks):
             logger.info("TTS: чанк %d/%d (%d символов)", i + 1, len(chunks), len(chunk))
             pcm = work_dir / f"tts_{i:03d}.pcm"
-            await _synthesize_chunk(client, chunk, pcm)
+            try:
+                await _synthesize_chunk(client, chunk, pcm)
+            except APIError as exc:
+                raise TTSError("Ошибка при обращении к Yandex SpeechKit. Попробуйте позже.") from exc
             pcm_paths.append(pcm)
 
     audio_path = work_dir / "tts_audio.mp3"
@@ -84,14 +104,6 @@ async def synthesize(text: str, work_dir: Path) -> tuple[Path, float]:
                "-c:a", "libmp3lame", "-b:a", "192k", str(audio_path)]
     else:
         # Кроссфейд между чанками (50 мс) для плавного перехода интонации
-        filter_parts = []
-        for i, pcm in enumerate(pcm_paths):
-            filter_parts.append(f"[{i}:a]")
-        # chain crossfade: [0:a][1:a]acrossfade=d=0.05[a01];[a01][2:a]acrossfade=d=0.05[a012]...
-        filter_complex = ""
-        for i in range(len(pcm_paths)):
-            filter_complex += f"[{i}:a]"
-        # Build crossfade chain
         cf = []
         for i in range(len(pcm_paths) - 1):
             if i == 0:
@@ -105,7 +117,11 @@ async def synthesize(text: str, work_dir: Path) -> tuple[Path, float]:
             cmd += ["-f", "s16le", "-ar", str(config.TTS_SAMPLE_RATE), "-ac", "1", "-i", str(pcm)]
         cmd += ["-filter_complex", filter_complex, "-map", last_label,
                 "-c:a", "libmp3lame", "-b:a", "192k", str(audio_path)]
-    await asyncio.to_thread(subprocess.run, cmd, check=True, capture_output=True)
+    try:
+        await asyncio.to_thread(subprocess.run, cmd, check=True, capture_output=True)
+    except subprocess.CalledProcessError as exc:
+        logger.exception("Ошибка ffmpeg при склейке аудио")
+        raise TTSError("Ошибка при сборке аудиофайла. Попробуйте сократить текст.") from exc
 
     duration = await asyncio.to_thread(probe_duration, audio_path)
     logger.info("TTS готов: %s, длительность %.2f с", audio_path.name, duration)

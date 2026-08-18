@@ -12,6 +12,8 @@ from aiogram.types import FSInputFile, Message
 
 import config
 from pipeline import process_text
+from tts import TTSError
+from video_source import VideoSourceError
 
 logging.basicConfig(
     level=logging.INFO,
@@ -64,6 +66,13 @@ async def cmd_help(message: Message) -> None:
     await message.answer(HELP_TEXT)
 
 
+@dp.message(Command("clear_cache"))
+async def cmd_clear_cache(message: Message) -> None:
+    from cache import clear_cache
+    count = clear_cache()
+    await message.answer(f"🗑 Кэш очищен. Удалено файлов: {count}")
+
+
 @dp.message(F.text & ~F.command)
 async def on_text(message: Message) -> None:
     await _handle(message, message.text)
@@ -109,9 +118,15 @@ async def _handle(message: Message, text: str) -> None:
             for i, video in enumerate(videos, 1):
                 caption = "🎬 Готово! Видео к публикации." if len(videos) == 1 else f"🎬 Часть {i}/{len(videos)}"
                 await message.answer_video(FSInputFile(video), caption=caption)
+        except TTSError as exc:
+            logger.error("TTS ошибка для пользователя %s: %s", message.from_user.id, exc.details or exc)
+            await message.answer(f"🔊 Ошибка озвучки: {exc}\n\nПопробуйте сократить текст или повторите позже.")
+        except VideoSourceError as exc:
+            logger.error("Ошибка видео-источника для пользователя %s: %s", message.from_user.id, exc.details or exc)
+            await message.answer(f"🎬 Ошибка подбора видео: {exc}\n\nПопробуйте другую новость или повторите позже.")
         except Exception as exc:
             logger.exception("Пайплайн упал для пользователя %s", message.from_user.id)
-            await message.answer(f"❌ Не получилось: {exc}\n\nПопробуй ещё раз. Если ошибка повторится — посмотри логи.")
+            await message.answer("❌ Внутренняя ошибка. Попробуйте ещё раз. Если повторится — проверьте логи.")
 
 
 async def main() -> None:

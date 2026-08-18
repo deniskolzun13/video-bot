@@ -20,6 +20,13 @@ except ImportError:
 
 logger = logging.getLogger(__name__)
 
+
+class VideoSourceError(Exception):
+    """Ошибка поиска/скачивания видео — сообщение для пользователя."""
+    def __init__(self, message: str, details: str = ""):
+        super().__init__(message)
+        self.details = details
+
 STOPWORDS = set(
     """и в во не что он на я с со как а то все она так его но да ты к у же вы за бы по
     только ее мне было вот от меня еще нет о из ему теперь когда даже ну вдруг ли если уже
@@ -95,7 +102,7 @@ class PexelsProvider(VideoSourceProvider):
 
     def __init__(self, api_key: str):
         if not api_key:
-            raise ValueError("Задай PEXELS_API_KEY в .env")
+            raise VideoSourceError("Не задан PEXELS_API_KEY в настройках")
         self.api_key = api_key
 
     async def search(self, query: str, per_page: int = 5) -> list[VideoClip]:
@@ -104,7 +111,10 @@ class PexelsProvider(VideoSourceProvider):
         async with httpx.AsyncClient(timeout=60) as client:
             response = await client.get(self.BASE_URL, params=params, headers=headers)
         if response.status_code != 200:
-            raise ValueError(f"Pexels вернул ошибку {response.status_code}: {response.text[:300]}")
+            raise VideoSourceError(
+                f"Pexels API недоступен (код {response.status_code}). Попробуйте позже.",
+                f"Pexels API error {response.status_code}: {response.text[:200]}",
+            )
         data = response.json()
         clips: list[VideoClip] = []
         for video in data.get("videos", []):
@@ -139,7 +149,7 @@ class PixabayProvider(VideoSourceProvider):
 
     def __init__(self, api_key: str):
         if not api_key:
-            raise ValueError("Задай PIXABAY_API_KEY в .env")
+            raise VideoSourceError("Не задан PIXABAY_API_KEY в настройках")
         self.api_key = api_key
 
     async def search(self, query: str, per_page: int = 5) -> list[VideoClip]:
@@ -153,7 +163,10 @@ class PixabayProvider(VideoSourceProvider):
         async with httpx.AsyncClient(timeout=60) as client:
             response = await client.get(self.BASE_URL, params=params)
         if response.status_code != 200:
-            raise ValueError(f"Pixabay вернул ошибку {response.status_code}: {response.text[:300]}")
+            raise VideoSourceError(
+                f"Pixabay API недоступен (код {response.status_code}). Попробуйте позже.",
+                f"Pixabay API error {response.status_code}: {response.text[:200]}",
+            )
         data = response.json()
         clips: list[VideoClip] = []
         for video in data.get("hits", []):
@@ -289,7 +302,7 @@ class SteamProvider(VideoSourceProvider):
 
     def __init__(self, game_name: str):
         if not game_name:
-            raise ValueError("Не указано название игры")
+            raise VideoSourceError("Не указано название игры для поиска в Steam")
         self.game_name = game_name
 
     async def search(self, query: str, per_page: int = 1) -> list[VideoClip]:
@@ -308,10 +321,16 @@ class SteamProvider(VideoSourceProvider):
                     headers=headers,
                 )
             if response.status_code != 200:
-                raise ValueError(f"Steam search вернул ошибку {response.status_code}")
+                raise VideoSourceError(
+                    "Steam API временно недоступен. Попробуйте позже.",
+                    f"Steam search error {response.status_code}",
+                )
             items = response.json().get("items") or []
             if not items:
-                return []
+                raise VideoSourceError(
+                    f"Игра «{query}» не найдена в Steam",
+                    f"No items found for query: {query}",
+                )
             appid = items[0]["id"]
             logger.info("Steam: «%s» -> appid=%s (%s)", query, appid, items[0].get("name"))
 
@@ -328,15 +347,24 @@ class SteamProvider(VideoSourceProvider):
                     headers=headers,
                 )
             if details.status_code != 200:
-                raise ValueError(f"Steam appdetails вернул ошибку {details.status_code}")
+                raise VideoSourceError(
+                    "Steam API недоступен для получения деталей игры.",
+                    f"Steam appdetails error {details.status_code}",
+                )
             data = details.json().get(str(appid), {}).get("data") or {}
             movies = data.get("movies") or []
             if not movies:
-                return []
+                raise VideoSourceError(
+                    f"У игры «{items[0].get('name', query)}» нет трейлеров в Steam",
+                    f"No movies for appid {appid}",
+                )
             movie = self._pick_best_movie(movies)
             url = movie.get("hls_h264") or movie.get("dash_h264") or ""
             if not url:
-                return []
+                raise VideoSourceError(
+                    "Не удалось получить ссылку на трейлер",
+                    f"No video URL for movie {movie.get('id')}",
+                )
             logger.info("Steam: выбран трейлер «%s»", movie.get("name") or movie.get("id"))
             return [VideoClip(id=str(movie["id"]), url=url, width=0, height=0,
                               duration=0.0, query=query)]
