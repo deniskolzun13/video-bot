@@ -1,7 +1,10 @@
+import logging
 import re
 from pathlib import Path
 
 import config
+
+logger = logging.getLogger(__name__)
 
 SENTENCE_SPLIT = re.compile(r"(?<=[.!?…])\s+")
 
@@ -45,8 +48,87 @@ def split_into_phrases(text: str, min_chars: int = 20, max_chars: int = 70) -> l
     return phrases or [text]
 
 
+async def build_timings_aligned(
+    phrases: list[str],
+    audio_path: str,
+    language: str = "ru",
+) -> list[tuple[float, float]]:
+    """
+    Forced alignment через whisper-timestamped (CPU).
+    Возвращает тайминги фраз, сопоставленные по словам.
+    Falls back к пропорциональному таймингу при ошибке.
+    """
+    try:
+        import whisper_timestamped as whisper_ts
+    except Exception as exc:
+        logger.warning("whisper-timestamped недоступен (%s), fallback на пропорциональный", exc)
+        return None
+
+    try:
+        logger.info("Запуск forced alignment (whisper-timestamped)...")
+        # Загружаем модель base (быстрая, ~150 MB) для русского языка
+        model = whisper_ts.load_model("base", device="cpu")
+        audio = whisper_ts.load_audio(audio_path)
+        result = whisper_ts.transcribe(model, audio, language=language, verbose=False)
+
+        # Извлекаем слово-уровневые тайминги
+        words = []
+        for segment in result.get("segments", []):
+            for w in segment.get("words", []):
+                words.append({
+                    "text": w["text"].strip(),
+                    "start": w["start"],
+                    "end": w["end"],
+                })
+
+        if not words:
+            logger.warning("Whisper не вернул слова, fallback на пропорциональный")
+            return None
+
+        # Сопоставляем фразы с таймингами слов
+        timings = []
+        word_idx = 0
+        for phrase in phrases:
+            phrase_words = re.findall(r"\b\w+\b", phrase.lower())
+            if not phrase_words:
+                # Пустая фраза — пропускаем
+                timings.append((0.0, 0.0))
+                continue
+
+            # Ищем совпадение слов в транскрипции
+            matched = 0
+            start_t = None
+            end_t = None
+            for i, w in enumerate(words[word_idx:], start=word_idx):
+                if w["text"].lower() == phrase_words[matched]:
+                    if start_t is None:
+                        start_t = w["start"]
+                    matched += 1
+                    end_t = w["end"]
+                    if matched == len(phrase_words):
+                        word_idx = i + 1
+                        break
+                else:
+                    # Сброс при несовпадении
+                    matched = 0
+                    start_t = None
+
+            if start_t is None or end_t is None:
+                logger.debug("Не удалось выровнять фразу: %s", phrase)
+                return None
+
+            timings.append((start_t, end_t))
+
+        logger.info("Forced alignment успешен: %d фраз", len(timings))
+        return timings
+
+    except Exception as exc:
+        logger.warning("Forced alignment упал (%s), fallback на пропорциональный", exc)
+        return None
+
+
 def build_timings(phrases: list[str], total_duration: float) -> list[tuple[float, float]]:
-    """Пропорциональный тайминг по длине текста (упрощение вместо forced alignment)."""
+    """Пропорциональный тайминг по длине текста (фоллбэк)."""
     total_chars = sum(len(p) for p in phrases) or 1
     timings: list[tuple[float, float]] = []
     t = 0.0

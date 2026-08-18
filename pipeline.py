@@ -5,7 +5,14 @@ from pathlib import Path
 from typing import Awaitable, Callable
 
 import config
-from subtitles import build_timings, generate_ass, generate_srt, split_into_phrases, split_sentences
+from subtitles import (
+    build_timings,
+    build_timings_aligned,
+    generate_ass,
+    generate_srt,
+    split_into_phrases,
+    split_sentences,
+)
 from tts import synthesize
 from video_render import render_video
 from video_source import PexelsProvider, SteamProvider, extract_game_name, prepare_clips
@@ -88,7 +95,9 @@ async def process_text(
 
         await notify("✂️ Разбиваю на фразы и считаю тайминг…")
         phrases = split_into_phrases(part)
-        timings = build_timings(phrases, duration)
+        timings = await build_timings_aligned(phrases, str(audio_path))
+        if timings is None:
+            timings = build_timings(phrases, duration)
         ass_path = generate_ass(phrases, timings, wd / "subs.ass")
         generate_srt(phrases, timings, wd / "subs.srt")
 
