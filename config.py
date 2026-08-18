@@ -40,6 +40,11 @@ PIXABAY_API_KEY = getenv("PIXABAY_API_KEY")
 VIDEO_SOURCE = getenv("VIDEO_SOURCE", "auto")
 MIN_CLIPS_PER_PHRASE = int(getenv("MIN_CLIPS_PER_PHRASE", "2"))
 
+# Кэш скачанных клипов
+CACHE_DIR = getenv("CACHE_DIR", "cache")
+CACHE_TTL_DAYS = int(getenv("CACHE_TTL_DAYS", "7"))
+MAX_CACHE_SIZE_MB = int(getenv("MAX_CACHE_SIZE_MB", "500"))
+
 # Как приводить клипы к 9:16: blur — размытая подложка по бокам (видно весь кадр,
 # для трейлеров 16:9), crop — жёсткая обрезка по центру
 VIDEO_PADDING = getenv("VIDEO_PADDING", "blur")

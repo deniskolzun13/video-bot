@@ -13,6 +13,11 @@ from deep_translator import GoogleTranslator
 import config
 from tts import probe_duration
 
+try:
+    from cache import get_cached, put_to_cache
+except ImportError:
+    get_cached = put_to_cache = None
+
 logger = logging.getLogger(__name__)
 
 STOPWORDS = set(
@@ -45,14 +50,43 @@ class VideoSourceProvider(ABC):
     async def search(self, query: str, per_page: int = 5) -> list[VideoClip]:
         ...
 
+    def _cache_key(self, clip: VideoClip) -> str:
+        """Ключ кэша: провайдер:запрос:id"""
+        provider_name = self.__class__.__name__.replace("Provider", "").lower()
+        return f"{provider_name}:{clip.query}:{clip.id}"
+
     async def download(self, clip: VideoClip, dest: Path) -> Path:
         dest.parent.mkdir(parents=True, exist_ok=True)
+
+        # Проверяем кэш
+        cache_key = self._cache_key(clip)
+        if get_cached:
+            cached = get_cached(cache_key, self.__class__.__name__)
+            if cached and cached.exists():
+                try:
+                    import shutil
+                    shutil.copy2(cached, dest)
+                    logger.info("Кэш HIT: %s", cache_key)
+                    return dest
+                except Exception:
+                    pass
+
+        # Скачиваем
         async with httpx.AsyncClient(timeout=180) as client:
             async with client.stream("GET", clip.url, follow_redirects=True) as response:
                 response.raise_for_status()
                 with open(dest, "wb") as f:
                     async for chunk in response.aiter_bytes():
                         f.write(chunk)
+
+        # Сохраняем в кэш
+        if put_to_cache:
+            try:
+                cache_key_str = self._cache_key(clip)
+                put_to_cache(cache_key_str, self.__class__.__name__, dest)
+            except Exception as exc:
+                logger.warning("Не удалось сохранить в кэш: %s", exc)
+
         return dest
 
 
@@ -326,8 +360,24 @@ class SteamProvider(VideoSourceProvider):
 
         return max(movies, key=score)
 
+    def _cache_key(self, clip: VideoClip) -> str:
+        return f"steam:{self.game_name}:{clip.id}"
+
     async def download(self, clip: VideoClip, dest: Path) -> Path:
         dest.parent.mkdir(parents=True, exist_ok=True)
+
+        cache_key = self._cache_key(clip)
+        if get_cached:
+            cached = get_cached(cache_key, "SteamProvider")
+            if cached and cached.exists():
+                try:
+                    import shutil
+                    shutil.copy2(cached, dest)
+                    logger.info("Кэш HIT (Steam): %s", cache_key)
+                    return dest
+                except Exception:
+                    pass
+
         cmd = ["ffmpeg", "-y", "-v", "error", "-i", clip.url, "-map", "0:v", "-c", "copy", str(dest)]
         result = await asyncio.to_thread(
             subprocess.run, cmd, capture_output=True, text=True
@@ -340,6 +390,13 @@ class SteamProvider(VideoSourceProvider):
             )
             if result.returncode != 0:
                 raise ValueError(f"Не удалось скачать трейлер из Steam: {result.stderr[-500:]}")
+
+        if put_to_cache:
+            try:
+                put_to_cache(cache_key, "SteamProvider", dest)
+            except Exception as exc:
+                logger.warning("Не удалось сохранить в кэш (Steam): %s", exc)
+
         return dest
 
 
