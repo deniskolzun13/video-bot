@@ -9,12 +9,13 @@ import config
 from subtitles import (
     build_timings,
     build_timings_aligned,
+    build_timings_word_level,
     generate_ass,
     generate_srt,
     split_into_phrases,
     split_sentences,
 )
-from tts import synthesize
+from tts import get_word_timestamps, synthesize
 from video_render import render_video
 from video_source import PexelsProvider, SteamProvider, extract_game_name, prepare_clips
 
@@ -101,7 +102,13 @@ async def process_text(
 
         await notify("✂️ Разбиваю на фразы и считаю тайминг…")
         phrases = split_into_phrases(part)
-        timings = await build_timings_aligned(phrases, str(audio_path))
+        # 1. Word-level timestamps from Yandex ASR (most accurate)
+        word_ts = await get_word_timestamps(audio_path, part)
+        timings = await build_timings_word_level(phrases, word_ts) if word_ts else None
+        # 2. Forced alignment via whisper-timestamped
+        if timings is None:
+            timings = await build_timings_aligned(phrases, str(audio_path))
+        # 3. Proportional fallback
         if timings is None:
             timings = build_timings(phrases, duration)
         ass_path = generate_ass(phrases, timings, wd / "subs.ass")

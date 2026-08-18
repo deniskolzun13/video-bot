@@ -1,4 +1,5 @@
 import asyncio
+import io
 import json
 import logging
 import re
@@ -13,6 +14,7 @@ from subtitles import split_sentences
 logger = logging.getLogger(__name__)
 
 TTS_URL = "https://tts.api.cloud.yandex.net/speech/v1/tts:synthesize"
+ASR_URL = "https://stt.api.cloud.yandex.net/speech/v1/stt:recognize"
 
 
 class TTSError(Exception):
@@ -36,6 +38,74 @@ def _auth_headers() -> dict[str, str]:
     if config.YANDEX_IAM_TOKEN:
         return {"Authorization": f"Bearer {config.YANDEX_IAM_TOKEN}"}
     raise TTSError("Не настроен Yandex SpeechKit: отсутствует API-ключ или IAM-токен")
+
+
+async def get_word_timestamps(audio_path: Path, text: str) -> list[dict] | None:
+    """Получение word-level timestamps через Yandex SpeechKit Speech Recognition API.
+    Используется для точного тайминга субтитров.
+    Возвращает список {'word': str, 'start': float, 'end': float} или None при ошибке."""
+    if not config.YANDEX_FOLDER_ID:
+        logger.warning("YANDEX_FOLDER_ID не задан, нельзя получить word-level timestamps")
+        return None
+
+    try:
+        from pydub import AudioSegment
+    except ImportError:
+        logger.warning("pydub не установлен, нельзя конвертировать аудио для ASR")
+        return None
+
+    # Конвертируем mp3 в WAV (16kHz mono PCM) для Yandex SpeechKit ASR
+    audio = AudioSegment.from_file(str(audio_path))
+    audio = audio.set_frame_rate(16000).set_channels(1).set_sample_fmt("s16")
+    buf = io.BytesIO()
+    audio.export(buf, format="wav")
+    buf.seek(0)
+
+    params = {
+        "folderId": config.YANDEX_FOLDER_ID,
+        "lang": config.TTS_LANG.replace("-", "_").lower(),
+    }
+    if text:
+        params["text"] = text  # использовать как эталон для лучшего распознавания
+
+    headers = _auth_headers()
+    headers["Content-Type"] = "audio/wav"
+
+    try:
+        async with httpx.AsyncClient(timeout=120) as client:
+            response = await client.post(
+                ASR_URL,
+                params=params,
+                headers=headers,
+                content=buf.read(),
+            )
+        if response.status_code != 200:
+            logger.warning("Yandex ASR вернул %d, word-level timestamps недоступны", response.status_code)
+            return None
+
+        result = response.json()
+        words: list[dict] = []
+        for hyp in result.get("hypotheses", []):
+            if hyp.get("confidence", 0) < 0.5:
+                continue
+            for w in hyp.get("words", []):
+                words.append({
+                    "word": w.get("word", "").strip(),
+                    "start": w.get("start", 0.0),
+                    "end": w.get("end", 0.0),
+                })
+            if words:
+                break
+
+        if not words:
+            logger.warning("Yandex ASR не вернул слова для word-level timestamps")
+            return None
+
+        logger.info("Получены word-level timestamps: %d слов", len(words))
+        return words
+    except Exception as exc:
+        logger.warning("Ошибка получения word-level timestamps: %s", exc)
+        return None
 
 
 def split_into_chunks(text: str, limit: int = config.TTS_MAX_CHUNK) -> list[str]:

@@ -123,7 +123,55 @@ async def build_timings_aligned(
         return timings
 
     except Exception as exc:
-        logger.warning("Forced alignment упал (%s), fallback на пропорциональный", exc)
+        logger.warning("Forced alignment упал (%s), fallback на пропорциальный", exc)
+        return None
+
+
+async def build_timings_word_level(
+    phrases: list[str],
+    word_timestamps: list[dict],
+) -> list[tuple[float, float]] | None:
+    """Построение тайминга фраз по word-level timestamps.
+    Сопоставляет слова из фраз с timestamps-словами от Yandex ASR."""
+    if not word_timestamps:
+        return None
+
+    try:
+        timings = []
+        word_idx = 0
+        for phrase in phrases:
+            phrase_words = re.findall(r"\b\w+\b", phrase.lower())
+            if not phrase_words:
+                timings.append((0.0, 0.0))
+                continue
+
+            matched = 0
+            start_t = None
+            end_t = None
+            i = word_idx
+            while i < len(word_timestamps):
+                w = word_timestamps[i]
+                if w["word"].lower() == phrase_words[matched]:
+                    if start_t is None:
+                        start_t = w["start"]
+                    matched += 1
+                    end_t = w["end"]
+                    i += 1
+                    if matched == len(phrase_words):
+                        break
+                else:
+                    i += 1
+
+            if start_t is None or end_t is None:
+                return None
+
+            timings.append((start_t, end_t))
+            word_idx = i
+
+        logger.info("Word-level тайминг успешен: %d фраз", len(timings))
+        return timings
+    except Exception as exc:
+        logger.warning("Word-level тайминг упал (%s)", exc)
         return None
 
 
