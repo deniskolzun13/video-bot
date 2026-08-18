@@ -126,13 +126,18 @@ class PexelsProvider(VideoSourceProvider):
             ]
             if not files:
                 continue
+            # Фильтруем по минимальному разрешению
+            qualified = [f for f in files if (f.get("width") or 0) >= config.MIN_CLIP_WIDTH]
+            if not qualified:
+                # Если нет клипа с минимальным разрешением — пропускаем
+                continue
             chosen = None
-            for f in sorted(files, key=lambda f: f.get("width") or 0, reverse=True):
-                if (f.get("width") or 0) <= 1100 and (f.get("width") or 0) >= 480:
+            for f in sorted(qualified, key=lambda f: f.get("width") or 0, reverse=True):
+                if (f.get("width") or 0) <= 1100:
                     chosen = f
                     break
             if chosen is None:
-                chosen = files[0]
+                chosen = qualified[0]
             clips.append(
                 VideoClip(
                     id=str(video["id"]),
@@ -173,16 +178,20 @@ class PixabayProvider(VideoSourceProvider):
         clips: list[VideoClip] = []
         for video in data.get("hits", []):
             files = video.get("videos", {})
-            # Prefer 1080p vertical, fallback to 720p
+            # Prefer 1080p vertical, fallback to 720p, filter by min resolution
             chosen = None
             for quality in ("1080", "720", "large", "medium", "small", "tiny"):
                 if quality in files:
                     f = files[quality]
-                    if f.get("url") and f.get("width", 0) <= 1100:
+                    if f.get("url") and f.get("width", 0) >= config.MIN_CLIP_WIDTH and f.get("width", 0) <= 1100:
                         chosen = f
                         break
-            if chosen is None and files:
-                chosen = next(iter(files.values()))
+            if chosen is None:
+                # Fallback: any file meeting min width
+                for f in files.values():
+                    if f.get("url") and f.get("width", 0) >= config.MIN_CLIP_WIDTH:
+                        chosen = f
+                        break
             if chosen is None or not chosen.get("url"):
                 continue
             clips.append(

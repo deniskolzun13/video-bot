@@ -39,6 +39,8 @@ PIXABAY_API_KEY = getenv("PIXABAY_API_KEY")
 
 VIDEO_SOURCE = getenv("VIDEO_SOURCE", "auto")
 MIN_CLIPS_PER_PHRASE = int(getenv("MIN_CLIPS_PER_PHRASE", "2"))
+# Минимальное разрешение клипов (не ниже этого — будет мыльно)
+MIN_CLIP_WIDTH = int(getenv("MIN_CLIP_WIDTH", "720"))
 
 # Кэш скачанных клипов
 CACHE_DIR = getenv("CACHE_DIR", "cache")
