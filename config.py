@@ -78,6 +78,11 @@ MAX_PARTS = int(getenv("MAX_PARTS", "4"))
 
 KEYWORDS_COUNT = int(getenv("KEYWORDS_COUNT", "4"))
 
+# Фоновая музыка
+BACKGROUND_MUSIC = getenv("BACKGROUND_MUSIC", "").lower() in ("1", "true", "yes")
+BG_MUSIC_PATH = getenv("BG_MUSIC_PATH", "music/ambience.mp3")
+BG_MUSIC_VOLUME = float(getenv("BG_MUSIC_VOLUME", "-23"))  # dB, относительно громкости диалога
+
 SUB_FONT = getenv("SUB_FONT", "Arial")
 SUB_FONTSIZE = 64
 SUB_PRIMARY = "&H00FFFFFF"

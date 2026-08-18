@@ -6,4 +6,5 @@ work/
 output/
 .venv/
 cache/
+music/
 .pytest_cache/

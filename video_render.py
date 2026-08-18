@@ -47,6 +47,16 @@ def render_video(
         cmd += ["-stream_loop", "-1", "-i", str(clip_path)]
     cmd += ["-i", str(audio_path)]
 
+    # Фоновая музыка
+    music_input_idx = len(clips) + 1  # индекс входа для музыки
+    if config.BACKGROUND_MUSIC:
+        from pathlib import Path
+        music_path = Path(config.BG_MUSIC_PATH)
+        if music_path.exists():
+            cmd += ["-stream_loop", "-1", "-i", str(music_path)]
+        else:
+            logger.warning("Фоновая музыка включена, но файл не найден: %s", config.BG_MUSIC_PATH)
+
     encoder = _detect_h264_encoder()
     extra = ["-pix_fmt", "yuv420p"]
     if encoder == "libopenh264":
@@ -81,10 +91,28 @@ def render_video(
     filters.append(f"{concat_in}concat=n={len(clips)}:v=1:a=0[vc]")
     filters.append(f"[vc]ass={_escape_filter_path(ass_path)}[vout]")
 
+    audio_index = len(clips)  # индекс основной аудио (после всех видеоклипов)
+
+    if config.BACKGROUND_MUSIC:
+        from pathlib import Path
+        music_path = Path(config.BG_MUSIC_PATH)
+        if music_path.exists():
+            filters.append(
+                f"[{audio_index}:a]asetrate=48000[aout];"
+                f"[{music_input_idx}:a]aloop=loop=-1:size=2e10[bg];"
+                f"[bg]volume={config.BG_MUSIC_VOLUME}dB[bgm];"
+                f"[aout][bgm]sidechaincompress=threshold=0.0004:ratio=4:attack=10:release=100[mix]"
+            )
+            audio_output = "[mix]"
+        else:
+            audio_output = f"{audio_index}:a"
+    else:
+        audio_output = f"{audio_index}:a"
+
     cmd += [
         "-filter_complex", ";".join(filters),
         "-map", "[vout]",
-        "-map", f"{len(clips)}:a",
+        "-map", audio_output,
         "-c:v", encoder,
         "-preset", "medium",
         "-crf", "20",
