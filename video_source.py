@@ -100,6 +100,55 @@ class PexelsProvider(VideoSourceProvider):
         return clips
 
 
+class PixabayProvider(VideoSourceProvider):
+    BASE_URL = "https://pixabay.com/api/videos/"
+
+    def __init__(self, api_key: str):
+        if not api_key:
+            raise ValueError("Задай PIXABAY_API_KEY в .env")
+        self.api_key = api_key
+
+    async def search(self, query: str, per_page: int = 5) -> list[VideoClip]:
+        params = {
+            "key": self.api_key,
+            "q": query,
+            "orientation": "vertical",
+            "per_page": per_page,
+            "video_type": "film",
+        }
+        async with httpx.AsyncClient(timeout=60) as client:
+            response = await client.get(self.BASE_URL, params=params)
+        if response.status_code != 200:
+            raise ValueError(f"Pixabay вернул ошибку {response.status_code}: {response.text[:300]}")
+        data = response.json()
+        clips: list[VideoClip] = []
+        for video in data.get("hits", []):
+            files = video.get("videos", {})
+            # Prefer 1080p vertical, fallback to 720p
+            chosen = None
+            for quality in ("1080", "720", "large", "medium", "small", "tiny"):
+                if quality in files:
+                    f = files[quality]
+                    if f.get("url") and f.get("width", 0) <= 1100:
+                        chosen = f
+                        break
+            if chosen is None and files:
+                chosen = next(iter(files.values()))
+            if chosen is None or not chosen.get("url"):
+                continue
+            clips.append(
+                VideoClip(
+                    id=str(video["id"]),
+                    url=chosen["url"],
+                    width=chosen.get("width") or video.get("width") or 0,
+                    height=chosen.get("height") or video.get("height") or 0,
+                    duration=video.get("duration") or 0.0,
+                    query=query,
+                )
+            )
+        return clips
+
+
 def extract_keywords_heuristic(text: str, n: int = config.KEYWORDS_COUNT) -> list[str]:
     words = re.findall(r"[а-яёa-z][а-яёa-z-]{3,}", text.lower())
     words = [w for w in words if w not in STOPWORDS and not w.isdigit()]
@@ -333,13 +382,26 @@ async def _prepare_steam_clips(
     return result
 
 
+def _get_min_clips_per_phrase() -> int:
+    """Минимум клипов на фразу для Pexels, иначе включаем Pixabay fallback."""
+    return getattr(config, "MIN_CLIPS_PER_PHRASE", 1)
+
+
+def _get_pexels_provider():
+    return PexelsProvider(config.PEXELS_API_KEY)
+
+
+def _get_pixabay_provider():
+    return PixabayProvider(config.PIXABAY_API_KEY)
+
+
 async def _prepare_pexels_clips(
     phrases: list[str],
     timings: list[tuple[float, float]],
     provider: VideoSourceProvider,
     work_dir: Path,
 ) -> list[tuple[Path, float, float]]:
-    """Для каждой фразы скачивает клип с Pexels на основе тематической релевантности."""
+    """Для каждой фразы скачивает клип с Pexels (с Pixabay fallback) на основе тематической релевантности."""
     work_dir = Path(work_dir)
     work_dir.mkdir(parents=True, exist_ok=True)
 
@@ -354,33 +416,51 @@ async def _prepare_pexels_clips(
         keywords = ["technology", "abstract"]
     logger.info("Глобальные темы: %s", keywords)
 
-    # 2. Ищем клипы для каждой темы (кэшируем результаты)
+    # 2. Ищем клипы для каждой темы через Pexels, с Pixabay fallback
+    pexels_provider = _get_pexels_provider()
+    pixabay_provider = _get_pixabay_provider()
+    min_clips = _get_min_clips_per_phrase()
+
     theme_clips = {}
     used_ids = set()
-    for kw in keywords:
+
+    async def _search_with_fallback(kw: str) -> list[VideoClip]:
+        """Сначала Pexels, если мало результатов — Pixabay."""
+        # Сначала Pexels
         try:
-            candidates = await provider.search(kw, per_page=10)
-            # Фильтруем уже использованные
+            candidates = await pexels_provider.search(kw, per_page=10)
             fresh = [c for c in candidates if c.id not in used_ids]
-            if fresh:
-                theme_clips[kw] = fresh
-        except ValueError:
-            continue
+        except ValueError as exc:
+            logger.warning("Pexels поиск '%s' упал: %s", kw, exc)
+            fresh = []
+
+        # Если мало результатов — пробуем Pixabay
+        if len(fresh) < min_clips:
+            try:
+                pix_candidates = await pixabay_provider.search(kw, per_page=10)
+                pix_fresh = [c for c in pix_candidates if c.id not in used_ids]
+                fresh.extend(pix_fresh)
+                logger.info("Pixabay fallback для '%s': добавлено %d клипов", kw, len(pix_fresh))
+            except ValueError as exc:
+                logger.warning("Pixabay поиск '%s' упал: %s", kw, exc)
+
+        return fresh
+
+    for kw in keywords:
+        fresh = await _search_with_fallback(kw)
+        if fresh:
+            theme_clips[kw] = fresh
 
     if not theme_clips:
         # Fallback: ищем по первым ключевым словам
         for kw in keywords[:3]:
-            try:
-                candidates = await provider.search(kw, per_page=10)
-                fresh = [c for c in candidates if c.id not in used_ids]
-                if fresh:
-                    theme_clips[kw] = fresh
-                    break
-            except ValueError:
-                continue
+            fresh = await _search_with_fallback(kw)
+            if fresh:
+                theme_clips[kw] = fresh
+                break
 
     if not theme_clips:
-        raise ValueError("Pexels не вернул ни одного подходящего клипа")
+        raise ValueError("Ни Pexels, ни Pixabay не вернули подходящих клипов")
 
     # 3. Распределяем клипы по фразам на основе релевантности
     result = []
@@ -394,7 +474,6 @@ async def _prepare_pexels_clips(
         best_score = 0
 
         for theme, clips in theme_clips.items():
-            # Простая оценка релевантности: пересечение слов
             theme_words = set(re.findall(r"\w+", theme.lower()))
             phrase_words = set(re.findall(r"\w+", phrase.lower()))
             overlap = len(theme_words & phrase_words)
@@ -402,7 +481,6 @@ async def _prepare_pexels_clips(
                 best_score = overlap
                 best_theme = theme
 
-        # Если не нашли пересечения, берём тему с наибольшим количеством клипов
         if best_theme is None:
             best_theme = max(theme_clips, key=lambda k: len(theme_clips[k]))
 
@@ -413,7 +491,6 @@ async def _prepare_pexels_clips(
                 break
 
         if clip is None:
-            # Fallback: любой неиспользованный клип
             for theme_clips_list in theme_clips.values():
                 for c in theme_clips_list:
                     if c.id not in used_ids:

@@ -35,8 +35,10 @@ YANDEX_IAM_TOKEN = getenv("YANDEX_IAM_TOKEN")
 YANDEX_FOLDER_ID = getenv("YANDEX_FOLDER_ID")
 
 PEXELS_API_KEY = getenv("PEXELS_API_KEY")
+PIXABAY_API_KEY = getenv("PIXABAY_API_KEY")
 
 VIDEO_SOURCE = getenv("VIDEO_SOURCE", "auto")
+MIN_CLIPS_PER_PHRASE = int(getenv("MIN_CLIPS_PER_PHRASE", "2"))
 
 # Как приводить клипы к 9:16: blur — размытая подложка по бокам (видно весь кадр,
 # для трейлеров 16:9), crop — жёсткая обрезка по центру
