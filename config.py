@@ -90,6 +90,9 @@ SUB_OUTLINE_COLOR = "&H00000000"
 SUB_OUTLINE_WIDTH = 5
 SUB_SHADOW = 2
 SUB_MARGIN_V = 100
+# Выделение ключевых слов другим цветом в субтитрах (\c&H...&)
+SUB_HIGHLIGHT_KEYWORDS = getenv("SUB_HIGHLIGHT_KEYWORDS", "").lower() in ("1", "true", "yes")
+SUB_HIGHLIGHT_COLOR = getenv("SUB_HIGHLIGHT_COLOR", "&H0000FF&")
 
 WORK_DIR = getenv("WORK_DIR", "work")
 OUTPUT_DIR = getenv("OUTPUT_DIR", "output")

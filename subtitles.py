@@ -213,7 +213,40 @@ def _escape_ass(text: str) -> str:
     return text.replace("{", "\\{").replace("}", "\\}")
 
 
-def generate_ass(phrases: list[str], timings: list[tuple[float, float]], path: Path) -> Path:
+def _highlight_keywords(text: str, keywords: list[str]) -> str:
+    """Окружает ключевые слова и числа в тексте ASS override-тегами цвета.
+    Числа и слова из keywords выделяются цветом SUB_HIGHLIGHT_COLOR."""
+    if not config.SUB_HIGHLIGHT_KEYWORDS:
+        return _escape_ass(text)
+
+    # Список триггеров для выделения
+    triggers = set()
+    for kw in keywords:
+        triggers.update(w.lower() for w in re.findall(r"\b\w+\b", kw))
+    # Добавляем числа (включая числа с единицами измерения)
+    number_pattern = re.compile(r"\b\d+(?:\.\d+)?\s*[а-яё%]?\b")
+
+    # Разбиваем текст на токены, сохраняем позиции
+    result = []
+    pos = 0
+    token_pattern = re.compile(r"(\b\w+\b|\b\d+(?:\.\d+)?\s*[а-яё%]?\b|[^\s\w]+|\s+)", re.IGNORECASE)
+    for match in token_pattern.finditer(text):
+        token = match.group()
+        # Проверяем, нужно ли выделять
+        is_number = bool(number_pattern.fullmatch(token.strip()))
+        is_keyword = token.lower().strip() in triggers
+
+        if is_number or is_keyword:
+            # Не экранируем { } внутри тегов, экранируем только в обычном тексте
+            clean = _escape_ass(token)
+            result.append(f"{{\\c{config.SUB_HIGHLIGHT_COLOR}}}{clean}{{\\c{config.SUB_PRIMARY}}}")
+        else:
+            result.append(_escape_ass(token))
+
+    return "".join(result)
+
+
+def generate_ass(phrases: list[str], timings: list[tuple[float, float]], path: Path, keywords: list[str] | None = None) -> Path:
     header = (
         "[Script Info]\n"
         f"ScriptType: v4.00+\n"
@@ -236,8 +269,9 @@ def generate_ass(phrases: list[str], timings: list[tuple[float, float]], path: P
     )
     lines = []
     for (start, end), phrase in zip(timings, phrases):
+        escaped = _highlight_keywords(phrase, keywords or [])
         lines.append(
-            f"Dialogue: 0,{_ass_time(start)},{_ass_time(end)},Main,,0,0,0,,{_escape_ass(phrase)}"
+            f"Dialogue: 0,{_ass_time(start)},{_ass_time(end)},Main,,0,0,0,,{escaped}"
         )
     path.write_text(header + "\n".join(lines) + "\n", encoding="utf-8")
     return path

@@ -124,7 +124,7 @@ async def process_text(
         # 3. Proportional fallback
         if timings is None:
             timings = build_timings(phrases, duration)
-        ass_path = generate_ass(phrases, timings, wd / "subs.ass")
+        ass_path = generate_ass(phrases, timings, wd / "subs.ass", global_keywords)
         generate_srt(phrases, timings, wd / "subs.srt")
 
         await notify("🎬 Подбираю и скачиваю видео-клипы…")
