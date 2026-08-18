@@ -423,11 +423,12 @@ async def prepare_clips(
     timings: list[tuple[float, float]],
     provider: VideoSourceProvider,
     work_dir: Path,
+    keywords: list[str] | None = None,
 ) -> list[tuple[Path, float, float]]:
     """Возвращает [(путь_к_видео, длительность_сегмента, сдвиг_внутри_видео)]."""
     if isinstance(provider, SteamProvider):
         return await _prepare_steam_clips(phrases, timings, provider, work_dir)
-    return await _prepare_pexels_clips(phrases, timings, provider, work_dir)
+    return await _prepare_pexels_clips(phrases, timings, provider, work_dir, keywords)
 
 
 async def _prepare_steam_clips(
@@ -475,6 +476,7 @@ async def _prepare_pexels_clips(
     timings: list[tuple[float, float]],
     provider: VideoSourceProvider,
     work_dir: Path,
+    keywords: list[str] | None = None,
 ) -> list[tuple[Path, float, float]]:
     """Для каждой фразы скачивает клип с Pexels (с Pixabay fallback) на основе тематической релевантности."""
     work_dir = Path(work_dir)
@@ -485,8 +487,11 @@ async def _prepare_pexels_clips(
         return await _prepare_pexels_clips_legacy(phrases, timings, provider, work_dir)
 
     # 1. Извлекаем глобальные темы для всего текста
-    keywords = await extract_keywords(" ".join(phrases))
-    keywords = await translate_keywords(keywords)
+    if keywords:
+        keywords = keywords
+    else:
+        keywords = await extract_keywords(" ".join(phrases))
+        keywords = await translate_keywords(keywords)
     if not keywords:
         keywords = ["technology", "abstract"]
     logger.info("Глобальные темы: %s", keywords)

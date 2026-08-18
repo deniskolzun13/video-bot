@@ -17,7 +17,14 @@ from subtitles import (
 )
 from tts import get_word_timestamps, synthesize
 from video_render import render_video
-from video_source import PexelsProvider, SteamProvider, extract_game_name, prepare_clips
+from video_source import (
+    PexelsProvider,
+    SteamProvider,
+    extract_game_name,
+    extract_keywords,
+    prepare_clips,
+    translate_keywords,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -83,6 +90,12 @@ async def process_text(
         )
 
     provider = await _build_provider(text)
+
+    # Extract global keywords once for the entire text (used for video clip selection)
+    global_keywords = await extract_keywords(text)
+    global_keywords = await translate_keywords(global_keywords)
+    logger.info("Глобальные темы для всего текста: %s", global_keywords)
+
     root = Path(work_dir)
     videos: list[Path] = []
     for index, part in enumerate(parts):
@@ -116,12 +129,12 @@ async def process_text(
 
         await notify("🎬 Подбираю и скачиваю видео-клипы…")
         try:
-            clips = await prepare_clips(phrases, timings, provider, wd)
+            clips = await prepare_clips(phrases, timings, provider, wd, global_keywords)
         except ValueError as exc:
             if isinstance(provider, SteamProvider) and config.VIDEO_SOURCE == "auto":
                 logger.warning("Steam не дал видео (%s), fallback на Pexels", exc)
                 provider = PexelsProvider(config.PEXELS_API_KEY)
-                clips = await prepare_clips(phrases, timings, provider, wd)
+                clips = await prepare_clips(phrases, timings, provider, wd, global_keywords)
             else:
                 raise
 
