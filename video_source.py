@@ -18,6 +18,8 @@ try:
 except ImportError:
     get_cached = put_to_cache = None
 
+from prompts import PROMPT_EXTRACT_KEYWORDS, PROMPT_EXTRACT_GAME_NAME
+
 logger = logging.getLogger(__name__)
 
 
@@ -228,14 +230,7 @@ async def _llm_complete(prompt: str, timeout: float = 60) -> str | None:
 
 
 async def extract_keywords_llm(text: str, n: int = config.KEYWORDS_COUNT) -> list[str] | None:
-    prompt = (
-        f"Ты подбираешь стоковые видео для новости. Извлеки {n} КОНКРЕТНЫХ визуальных тем "
-        f"для поиска на Pexels — предметы, сцены, места, людей за работой (например: "
-        f"computer, server room, office, circuit board, programmer typing). "
-        f"ЗАПРЕЩЕНО: абстрактные понятия и многозначные слова (model, technology, news). "
-        f"Верни ТОЛЬКО слова через запятую, на английском, без нумерации.\n\n"
-        f"{text[:2000]}"
-    )
+    prompt = PROMPT_EXTRACT_KEYWORDS.format(n=n, text=text[:2000])
     content = await _llm_complete(prompt)
     if not content:
         return None
@@ -245,12 +240,7 @@ async def extract_keywords_llm(text: str, n: int = config.KEYWORDS_COUNT) -> lis
 
 async def extract_game_name(text: str) -> str | None:
     """Название игры из текста новости (для SteamProvider)."""
-    prompt = (
-        "Из текста игровой новости извлеки название игры, как оно указано в Steam. "
-        "Ответь ТОЛЬКО названием игры, БЕЗ кавычек, скобок и пояснений. "
-        "Если игры в тексте нет — ответь одним словом «нет».\n\n"
-        f"{text[:2000]}"
-    )
+    prompt = PROMPT_EXTRACT_GAME_NAME.format(text=text[:2000])
     content = await _llm_complete(prompt)
     if not content:
         return None
