@@ -260,24 +260,21 @@ def _highlight_keywords(text: str, keywords: list[str]) -> str:
     if not config.SUB_HIGHLIGHT_KEYWORDS:
         return _escape_ass(text)
 
-    # Список триггеров для выделения
+    # Список триггеров для выделения (целые слова из ключевых тем)
     triggers = set()
     for kw in keywords:
         triggers.update(w.lower() for w in re.findall(r"\b\w+\b", kw))
-    # Добавляем числа (включая числа с единицами измерения)
-    number_pattern = re.compile(r"\b\d+(?:\.\d+)?\s*[а-яё%]?\b")
 
-    # Разбиваем текст на токены, сохраняем позиции
+    # Токенизация: пробелы / числа (с десятичной точкой и % °) / слова / пунктуация.
+    # Числа идут до \w+, чтобы "4.5" и "79%" не разбивались на части.
+    token_pattern = re.compile(
+        r"\s+|\b\d+(?:[.,]\d+)?(?:%|°)?|\w+|[^\w\s]",
+        re.UNICODE | re.IGNORECASE,
+    )
     result = []
-    pos = 0
-    token_pattern = re.compile(r"(\b\w+\b|\b\d+(?:\.\d+)?\s*[а-яё%]?\b|[^\s\w]+|\s+)", re.IGNORECASE)
     for match in token_pattern.finditer(text):
         token = match.group()
-        # Проверяем, нужно ли выделять
-        is_number = bool(number_pattern.fullmatch(token.strip()))
-        is_keyword = token.lower().strip() in triggers
-
-        if is_number or is_keyword:
+        if token.strip() and (token.strip()[0].isdigit() or token.lower().strip() in triggers):
             # Не экранируем { } внутри тегов, экранируем только в обычном тексте
             clean = _escape_ass(token)
             result.append(f"{{\\c{config.SUB_HIGHLIGHT_COLOR}}}{clean}{{\\c{config.SUB_PRIMARY}}}")
