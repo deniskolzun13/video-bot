@@ -58,6 +58,10 @@ TTS_SPEED = float(getenv("TTS_SPEED", "1.0"))
 TTS_LANG = getenv("TTS_LANG", "ru-RU")
 TTS_SAMPLE_RATE = 48000
 TTS_MAX_CHUNK = int(getenv("TTS_MAX_CHUNK", "4500"))
+# Кроссфейд между чанками TTS в секундах (убирает слышимый шов интонации)
+TTS_CROSSFADE = float(getenv("TTS_CROSSFADE", "0.05"))
+# Отключить кроссфейд (склейка внахлёст) — для отладки/контроля
+TTS_DISABLE_CROSSFADE = getenv("TTS_DISABLE_CROSSFADE", "").lower() in ("1", "true", "yes")
 
 LLM_API_KEY = getenv("LLM_API_KEY")
 LLM_BASE_URL = getenv("LLM_BASE_URL", "https://api.openai.com/v1")

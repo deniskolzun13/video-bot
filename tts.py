@@ -1,5 +1,4 @@
 import asyncio
-import io
 import json
 import logging
 import re
@@ -48,18 +47,30 @@ async def get_word_timestamps(audio_path: Path, text: str) -> list[dict] | None:
         logger.warning("YANDEX_FOLDER_ID не задан, нельзя получить word-level timestamps")
         return None
 
-    try:
-        from pydub import AudioSegment
-    except ImportError:
-        logger.warning("pydub не установлен, нельзя конвертировать аудио для ASR")
+    # Конвертируем mp3 в WAV (16kHz mono PCM) для Yandex SpeechKit ASR через ffmpeg
+    wav_path = audio_path.with_suffix(".wav")
+    cmd = [
+        "ffmpeg", "-y", "-v", "quiet",
+        "-i", str(audio_path),
+        "-ar", "16000", "-ac", "1",
+        "-c:a", "pcm_s16le",
+        str(wav_path),
+    ]
+    result = await asyncio.to_thread(subprocess.run, cmd, capture_output=True)
+    if result.returncode != 0:
+        logger.warning("Не удалось конвертировать аудио в WAV для ASR: %s", result.stderr.decode()[:200])
         return None
 
-    # Конвертируем mp3 в WAV (16kHz mono PCM) для Yandex SpeechKit ASR
-    audio = AudioSegment.from_file(str(audio_path))
-    audio = audio.set_frame_rate(16000).set_channels(1).set_sample_fmt("s16")
-    buf = io.BytesIO()
-    audio.export(buf, format="wav")
-    buf.seek(0)
+    try:
+        audio_data = wav_path.read_bytes()
+    except Exception as exc:
+        logger.warning("Не удалось прочитать WAV-файл: %s", exc)
+        return None
+    finally:
+        try:
+            wav_path.unlink(missing_ok=True)
+        except Exception:
+            pass
 
     params = {
         "folderId": config.YANDEX_FOLDER_ID,
@@ -77,7 +88,7 @@ async def get_word_timestamps(audio_path: Path, text: str) -> list[dict] | None:
                 ASR_URL,
                 params=params,
                 headers=headers,
-                content=buf.read(),
+                content=audio_data,
             )
         if response.status_code != 200:
             logger.warning("Yandex ASR вернул %d, word-level timestamps недоступны", response.status_code)
@@ -173,20 +184,34 @@ async def synthesize(text: str, work_dir: Path) -> tuple[Path, float]:
         cmd = ["ffmpeg", "-y", "-f", "s16le", "-ar", str(config.TTS_SAMPLE_RATE), "-ac", "1", "-i", str(pcm_paths[0]),
                "-c:a", "libmp3lame", "-b:a", "192k", str(audio_path)]
     else:
-        # Кроссфейд между чанками (50 мс) для плавного перехода интонации
-        cf = []
-        for i in range(len(pcm_paths) - 1):
-            if i == 0:
-                cf.append(f"[{i}:a][{i+1}:a]acrossfade=d=0.05:c1=tri:c2=tri[a{i}{i+1}]")
-            else:
-                cf.append(f"[a{i-1}{i}][{i+1}:a]acrossfade=d=0.05:c1=tri:c2=tri[a{i}{i+1}]")
-        filter_complex = ";".join(cf)
-        last_label = f"[a{len(pcm_paths)-2}{len(pcm_paths)-1}]"
-        cmd = ["ffmpeg", "-y"]
-        for pcm in pcm_paths:
-            cmd += ["-f", "s16le", "-ar", str(config.TTS_SAMPLE_RATE), "-ac", "1", "-i", str(pcm)]
-        cmd += ["-filter_complex", filter_complex, "-map", last_label,
-                "-c:a", "libmp3lame", "-b:a", "192k", str(audio_path)]
+        # Кроссфейд между чанками для плавного перехода интонации
+        crossfade = config.TTS_CROSSFADE if not config.TTS_DISABLE_CROSSFADE else 0
+        if crossfade <= 0:
+            # Склейка внахлёст без кроссфейда
+            filter_chain = []
+            for i in range(len(pcm_paths) - 1):
+                filter_chain.append(f"[{i}:a][{i+1}:a]concat=v=0:a=1[at{i}]")
+            concat_label = f"[at{len(pcm_paths)-2}]"
+            filter_str = ";".join(filter_chain)
+            cmd = ["ffmpeg", "-y"]
+            for pcm in pcm_paths:
+                cmd += ["-f", "s16le", "-ar", str(config.TTS_SAMPLE_RATE), "-ac", "1", "-i", str(pcm)]
+            cmd += ["-filter_complex", filter_str, "-map", concat_label,
+                    "-c:a", "libmp3lame", "-b:a", "192k", str(audio_path)]
+        else:
+            cf = []
+            for i in range(len(pcm_paths) - 1):
+                if i == 0:
+                    cf.append(f"[{i}:a][{i+1}:a]acrossfade=d={crossfade:.3f}:c1=tri:c2=tri[a{i}{i+1}]")
+                else:
+                    cf.append(f"[a{i-1}{i}][{i+1}:a]acrossfade=d={crossfade:.3f}:c1=tri:c2=tri[a{i}{i+1}]")
+            filter_complex = ";".join(cf)
+            last_label = f"[a{len(pcm_paths)-2}{len(pcm_paths)-1}]"
+            cmd = ["ffmpeg", "-y"]
+            for pcm in pcm_paths:
+                cmd += ["-f", "s16le", "-ar", str(config.TTS_SAMPLE_RATE), "-ac", "1", "-i", str(pcm)]
+            cmd += ["-filter_complex", filter_complex, "-map", last_label,
+                    "-c:a", "libmp3lame", "-b:a", "192k", str(audio_path)]
     try:
         await asyncio.to_thread(subprocess.run, cmd, check=True, capture_output=True)
     except subprocess.CalledProcessError as exc:
