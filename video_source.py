@@ -166,6 +166,7 @@ async def extract_game_name(text: str) -> str | None:
 
 
 async def extract_keywords(text: str, n: int = config.KEYWORDS_COUNT) -> list[str]:
+    """Извлекает n ключевых тем для всего текста (не по фразам)."""
     keywords = await extract_keywords_llm(text, n)
     if keywords:
         return keywords
@@ -338,14 +339,120 @@ async def _prepare_pexels_clips(
     provider: VideoSourceProvider,
     work_dir: Path,
 ) -> list[tuple[Path, float, float]]:
-    """Для каждой фразы скачивает клип с Pexels."""
+    """Для каждой фразы скачивает клип с Pexels на основе тематической релевантности."""
+    work_dir = Path(work_dir)
+    work_dir.mkdir(parents=True, exist_ok=True)
+
+    # Для коротких текстов (< 3 фраз) используем старую логику
+    if len(phrases) < 3:
+        return await _prepare_pexels_clips_legacy(phrases, timings, provider, work_dir)
+
+    # 1. Извлекаем глобальные темы для всего текста
+    keywords = await extract_keywords(" ".join(phrases))
+    keywords = await translate_keywords(keywords)
+    if not keywords:
+        keywords = ["technology", "abstract"]
+    logger.info("Глобальные темы: %s", keywords)
+
+    # 2. Ищем клипы для каждой темы (кэшируем результаты)
+    theme_clips = {}
+    used_ids = set()
+    for kw in keywords:
+        try:
+            candidates = await provider.search(kw, per_page=10)
+            # Фильтруем уже использованные
+            fresh = [c for c in candidates if c.id not in used_ids]
+            if fresh:
+                theme_clips[kw] = fresh
+        except ValueError:
+            continue
+
+    if not theme_clips:
+        # Fallback: ищем по первым ключевым словам
+        for kw in keywords[:3]:
+            try:
+                candidates = await provider.search(kw, per_page=10)
+                fresh = [c for c in candidates if c.id not in used_ids]
+                if fresh:
+                    theme_clips[kw] = fresh
+                    break
+            except ValueError:
+                continue
+
+    if not theme_clips:
+        raise ValueError("Pexels не вернул ни одного подходящего клипа")
+
+    # 3. Распределяем клипы по фразам на основе релевантности
+    result = []
+    for i, ((start, end), phrase) in enumerate(zip(timings, phrases)):
+        need = max(end - start, 2.0)
+        dest = work_dir / f"clip_{i:03d}.mp4"
+
+        # Определяем наиболее релевантную тему для этой фразы
+        phrase_lower = phrase.lower()
+        best_theme = None
+        best_score = 0
+
+        for theme, clips in theme_clips.items():
+            # Простая оценка релевантности: пересечение слов
+            theme_words = set(re.findall(r"\w+", theme.lower()))
+            phrase_words = set(re.findall(r"\w+", phrase.lower()))
+            overlap = len(theme_words & phrase_words)
+            if overlap > best_score:
+                best_score = overlap
+                best_theme = theme
+
+        # Если не нашли пересечения, берём тему с наибольшим количеством клипов
+        if best_theme is None:
+            best_theme = max(theme_clips, key=lambda k: len(theme_clips[k]))
+
+        clip = None
+        for c in theme_clips[best_theme]:
+            if c.id not in used_ids:
+                clip = c
+                break
+
+        if clip is None:
+            # Fallback: любой неиспользованный клип
+            for theme_clips_list in theme_clips.values():
+                for c in theme_clips_list:
+                    if c.id not in used_ids:
+                        clip = c
+                        best_theme = [k for k, v in theme_clips.items() if c in v][0]
+                        break
+                if clip:
+                    break
+
+        if clip is None:
+            raise ValueError("Не удалось найти свободный клип для фразы")
+
+        used_ids.add(clip.id)
+        try:
+            await provider.download(clip, dest)
+            logger.info("Клип %d/%d: тема=%s, запрос=%s, id=%s",
+                        i + 1, len(phrases), best_theme, clip.query, clip.id)
+            result.append((dest, need, 0.0))
+        except Exception as exc:
+            logger.warning("Не удалось скачать клип %s: %s", clip.url, exc)
+            raise ValueError(f"Не удалось скачать видео по теме «{best_theme}»: {exc}")
+
+    return result
+
+
+async def _prepare_pexels_clips_legacy(
+    phrases: list[str],
+    timings: list[tuple[float, float]],
+    provider: VideoSourceProvider,
+    work_dir: Path,
+) -> list[tuple[Path, float, float]]:
+    """Старая логика round-robin для коротких текстов."""
     work_dir = Path(work_dir)
     work_dir.mkdir(parents=True, exist_ok=True)
     keywords = await extract_keywords(" ".join(phrases))
     keywords = await translate_keywords(keywords)
     if not keywords:
         keywords = ["technology", "abstract"]
-    logger.info("Ключевые слова: %s", keywords)
+    logger.info("Ключевые слова (legacy): %s", keywords)
 
     result: list[tuple[Path, float, float]] = []
     used_ids: set[str] = set()
