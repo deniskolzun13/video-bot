@@ -93,6 +93,8 @@ SUB_MARGIN_V = 100
 # Выделение ключевых слов другим цветом в субтитрах (\c&H...&)
 SUB_HIGHLIGHT_KEYWORDS = getenv("SUB_HIGHLIGHT_KEYWORDS", "").lower() in ("1", "true", "yes")
 SUB_HIGHLIGHT_COLOR = getenv("SUB_HIGHLIGHT_COLOR", "&H0000FF&")
+# Karaoke-анимация появления слов по буквам (\k-теги в ASS)
+SUB_KARAOKE = getenv("SUB_KARAOKE", "").lower() in ("1", "true", "yes")
 
 WORK_DIR = getenv("WORK_DIR", "work")
 OUTPUT_DIR = getenv("OUTPUT_DIR", "output")

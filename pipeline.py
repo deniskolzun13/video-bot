@@ -14,6 +14,7 @@ from subtitles import (
     generate_srt,
     split_into_phrases,
     split_sentences,
+    words_to_phrase_timings,
 )
 from tts import get_word_timestamps, synthesize
 from video_render import render_video
@@ -124,7 +125,15 @@ async def process_text(
         # 3. Proportional fallback
         if timings is None:
             timings = build_timings(phrases, duration)
-        ass_path = generate_ass(phrases, timings, wd / "subs.ass", global_keywords)
+
+        # For karaoke mode: convert word timestamps to per-phrase word timings
+        word_timings_per_phrase = None
+        if config.SUB_KARAOKE and word_ts:
+            word_timings_per_phrase = words_to_phrase_timings(phrases, word_ts)
+        ass_path = generate_ass(
+            phrases, timings, wd / "subs.ass", global_keywords,
+            word_timings_per_phrase if config.SUB_KARAOKE else None,
+        )
         generate_srt(phrases, timings, wd / "subs.srt")
 
         await notify("🎬 Подбираю и скачиваю видео-клипы…")

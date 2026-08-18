@@ -167,11 +167,52 @@ async def build_timings_word_level(
 
             timings.append((start_t, end_t))
             word_idx = i
-
         logger.info("Word-level тайминг успешен: %d фраз", len(timings))
         return timings
+
     except Exception as exc:
         logger.warning("Word-level тайминг упал (%s)", exc)
+        return None
+
+
+def words_to_phrase_timings(
+    phrases: list[str],
+    word_timestamps: list[dict],
+) -> list[list[tuple[str, float, float]]] | None:
+    """Разбивает word-level timestamps на фразы.
+    Возвращает для каждой фразы список (word, start, end) или None при ошибке."""
+    if not word_timestamps:
+        return None
+
+    try:
+        result: list[list[tuple[str, float, float]]] = []
+        word_idx = 0
+        for phrase in phrases:
+            phrase_words = re.findall(r"\b\w+\b", phrase.lower())
+            if not phrase_words:
+                result.append([])
+                continue
+
+            phrase_word_times: list[tuple[str, float, float]] = []
+            matched = 0
+            i = word_idx
+
+            while i < len(word_timestamps) and matched < len(phrase_words):
+                w = word_timestamps[i]
+                if w["word"].lower() == phrase_words[matched]:
+                    phrase_word_times.append((w["word"], w["start"], w["end"]))
+                    matched += 1
+                i += 1
+
+            if matched != len(phrase_words):
+                return None
+
+            result.append(phrase_word_times)
+            word_idx = i
+
+        return result
+    except Exception as exc:
+        logger.warning("words_to_phrase_timings упал (%s)", exc)
         return None
 
 
@@ -246,7 +287,40 @@ def _highlight_keywords(text: str, keywords: list[str]) -> str:
     return "".join(result)
 
 
-def generate_ass(phrases: list[str], timings: list[tuple[float, float]], path: Path, keywords: list[str] | None = None) -> Path:
+def _build_karaoke_line(phrase: str, word_timings: list[tuple[str, float, float]]) -> str:
+    """Собирает строку с Karaoke-анимацией (\\k-теги в ASS).
+    word_timings: [(word, start_time, end_time)] для каждого слова в фразе."""
+    if not word_timings:
+        return _escape_ass(phrase)
+
+    parts: list[str] = []
+    pos = 0
+    for word, w_start, w_end in word_timings:
+        # Пропускаем текст между словами (пробелы, пунктуация)
+        idx = phrase.find(word, pos)
+        if idx < 0:
+            # Не нашли слово — добавляем как есть
+            gap = phrase[pos:]
+            if gap:
+                parts.append(_escape_ass(gap))
+            break
+
+        gap = phrase[pos:idx]
+        if gap:
+            parts.append(_escape_ass(gap))
+
+        duration_cs = int(round((w_end - w_start) * 100))
+        parts.append(f"{{\\k{duration_cs}}}{_escape_ass(word)}")
+        pos = idx + len(word)
+
+    remainder = phrase[pos:]
+    if remainder:
+        parts.append(_escape_ass(remainder))
+
+    return "".join(parts)
+
+
+def generate_ass(phrases: list[str], timings: list[tuple[float, float]], path: Path, keywords: list[str] | None = None, word_timings_per_phrase: list[list[tuple[str, float, float]]] | None = None) -> Path:
     header = (
         "[Script Info]\n"
         f"ScriptType: v4.00+\n"
@@ -268,10 +342,14 @@ def generate_ass(phrases: list[str], timings: list[tuple[float, float]], path: P
         "Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\n"
     )
     lines = []
-    for (start, end), phrase in zip(timings, phrases):
-        escaped = _highlight_keywords(phrase, keywords or [])
+    for i, ((start, end), phrase) in enumerate(zip(timings, phrases)):
+        if config.SUB_KARAOKE and word_timings_per_phrase and i < len(word_timings_per_phrase):
+            # Karaoke mode: использовать \k-теги для анимации появления слов
+            line_text = _build_karaoke_line(phrase, word_timings_per_phrase[i])
+        else:
+            line_text = _highlight_keywords(phrase, keywords or [])
         lines.append(
-            f"Dialogue: 0,{_ass_time(start)},{_ass_time(end)},Main,,0,0,0,,{escaped}"
+            f"Dialogue: 0,{_ass_time(start)},{_ass_time(end)},Main,,0,0,0,,{line_text}"
         )
     path.write_text(header + "\n".join(lines) + "\n", encoding="utf-8")
     return path
