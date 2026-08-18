@@ -79,14 +79,32 @@ async def synthesize(text: str, work_dir: Path) -> tuple[Path, float]:
             pcm_paths.append(pcm)
 
     audio_path = work_dir / "tts_audio.mp3"
-    cmd = ["ffmpeg", "-y"]
-    for pcm in pcm_paths:
-        cmd += ["-f", "s16le", "-ar", str(config.TTS_SAMPLE_RATE), "-ac", "1", "-i", str(pcm)]
-    if len(pcm_paths) > 1:
-        chain = "".join(f"[{i}:a]" for i in range(len(pcm_paths)))
-        cmd += ["-filter_complex", f"{chain}concat=n={len(pcm_paths)}:v=0:a=1[a]"]
-        cmd += ["-map", "[a]"]
-    cmd += ["-c:a", "libmp3lame", "-b:a", "192k", str(audio_path)]
+    if len(pcm_paths) == 1:
+        cmd = ["ffmpeg", "-y", "-f", "s16le", "-ar", str(config.TTS_SAMPLE_RATE), "-ac", "1", "-i", str(pcm_paths[0]),
+               "-c:a", "libmp3lame", "-b:a", "192k", str(audio_path)]
+    else:
+        # Кроссфейд между чанками (50 мс) для плавного перехода интонации
+        filter_parts = []
+        for i, pcm in enumerate(pcm_paths):
+            filter_parts.append(f"[{i}:a]")
+        # chain crossfade: [0:a][1:a]acrossfade=d=0.05[a01];[a01][2:a]acrossfade=d=0.05[a012]...
+        filter_complex = ""
+        for i in range(len(pcm_paths)):
+            filter_complex += f"[{i}:a]"
+        # Build crossfade chain
+        cf = []
+        for i in range(len(pcm_paths) - 1):
+            if i == 0:
+                cf.append(f"[{i}:a][{i+1}:a]acrossfade=d=0.05:c1=tri:c2=tri[a{i}{i+1}]")
+            else:
+                cf.append(f"[a{i-1}{i}][{i+1}:a]acrossfade=d=0.05:c1=tri:c2=tri[a{i}{i+1}]")
+        filter_complex = ";".join(cf)
+        last_label = f"[a{len(pcm_paths)-2}{len(pcm_paths)-1}]"
+        cmd = ["ffmpeg", "-y"]
+        for pcm in pcm_paths:
+            cmd += ["-f", "s16le", "-ar", str(config.TTS_SAMPLE_RATE), "-ac", "1", "-i", str(pcm)]
+        cmd += ["-filter_complex", filter_complex, "-map", last_label,
+                "-c:a", "libmp3lame", "-b:a", "192k", str(audio_path)]
     await asyncio.to_thread(subprocess.run, cmd, check=True, capture_output=True)
 
     duration = await asyncio.to_thread(probe_duration, audio_path)
