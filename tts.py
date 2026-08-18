@@ -155,9 +155,22 @@ async def _synthesize_chunk(client: httpx.AsyncClient, chunk: str, dest: Path) -
         params["folderId"] = config.YANDEX_FOLDER_ID
     response = await client.post(TTS_URL, params=params, headers=_auth_headers())
     if response.status_code != 200:
+        try:
+            err_detail = response.json().get("error", {}).get("message", "")
+        except Exception:
+            err_detail = ""
+        status_messages = {
+            401: "Неверный API-ключ Yandex SpeechKit. Проверьте TELEGRAM_BOT_TOKEN и YANDEX_API_KEY.",
+            403: "Доступ к SpeechKit запрещён. Проверьте тариф и доступность сервиса.",
+            429: "Превышен лимит запросов к SpeechKit. Подождите несколько минут.",
+            503: "Сервис SpeechKit временно недоступен. Попробуйте позже.",
+        }
+        user_msg = status_messages.get(response.status_code, "Ошибка синтеза речи. Попробуйте позже.")
+        if err_detail:
+            user_msg += f" ({err_detail})"
         raise APIError(
             "Yandex SpeechKit",
-            f"Ошибка синтеза речи: {response.status_code}",
+            user_msg,
             response.status_code,
         )
     dest.write_bytes(response.content)
@@ -176,7 +189,8 @@ async def synthesize(text: str, work_dir: Path) -> tuple[Path, float]:
             try:
                 await _synthesize_chunk(client, chunk, pcm)
             except APIError as exc:
-                raise TTSError("Ошибка при обращении к Yandex SpeechKit. Попробуйте позже.") from exc
+                logger.error("TTS API error: %s (status=%d)", exc, exc.status_code)
+                raise TTSError(str(exc), exc.details or "") from exc
             pcm_paths.append(pcm)
 
     audio_path = work_dir / "tts_audio.mp3"

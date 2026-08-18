@@ -113,8 +113,17 @@ class PexelsProvider(VideoSourceProvider):
         async with httpx.AsyncClient(timeout=60) as client:
             response = await client.get(self.BASE_URL, params=params, headers=headers)
         if response.status_code != 200:
-            raise VideoSourceError(
+            status_messages = {
+                401: "Неверный PEXELS_API_KEY. Проверьте ключ.",
+                403: "Доступ к Pexels запрещён. Проверьте тариф.",
+                429: "Превышен лимит запросов к Pexels. Подождите минуту.",
+            }
+            user_msg = status_messages.get(
+                response.status_code,
                 f"Pexels API недоступен (код {response.status_code}). Попробуйте позже.",
+            )
+            raise VideoSourceError(
+                user_msg,
                 f"Pexels API error {response.status_code}: {response.text[:200]}",
             )
         data = response.json()
@@ -170,8 +179,17 @@ class PixabayProvider(VideoSourceProvider):
         async with httpx.AsyncClient(timeout=60) as client:
             response = await client.get(self.BASE_URL, params=params)
         if response.status_code != 200:
-            raise VideoSourceError(
+            status_messages = {
+                401: "Неверный PIXABAY_API_KEY. Проверьте ключ.",
+                403: "Доступ к Pixabay запрещён. Проверьте тариф.",
+                429: "Превышен лимит запросов к Pixabay. Подождите минуту.",
+            }
+            user_msg = status_messages.get(
+                response.status_code,
                 f"Pixabay API недоступен (код {response.status_code}). Попробуйте позже.",
+            )
+            raise VideoSourceError(
+                user_msg,
                 f"Pixabay API error {response.status_code}: {response.text[:200]}",
             )
         data = response.json()
