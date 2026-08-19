@@ -38,9 +38,10 @@ class OpenAICompatProvider(LLMProvider):
             raise LLMError("LLM_API_KEY не настроен", "Нет API-ключа для LLM")
         auth_type = self.auth_type
         if auth_type == "auto":
-            # YandexGPT/OpenRouter используют Api-Key, OpenAI — Bearer;
-            # определяем по префиксу ключа, если тип не задан явно
-            auth_type = "bearer" if self.api_key.startswith(("sk-", "t1.")) else "api-key"
+            # Большинство OpenAI-совместимых API (OpenAI, OpenRouter, YandexGPT)
+            # принимают Bearer-токен; если ваш провайдер требует иначе —
+            # задайте LLM_AUTH_TYPE=api-key или raw явно.
+            auth_type = "bearer"
         if auth_type == "bearer":
             return {self.auth_header: f"Bearer {self.api_key}"}
         if auth_type == "api-key":

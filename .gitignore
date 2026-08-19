@@ -10,3 +10,5 @@ cache/
 music/
 .pytest_cache/
 .ruff_cache/
+*.egg-info/
+video_bot.egg-info/

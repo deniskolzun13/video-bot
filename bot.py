@@ -31,7 +31,9 @@ job_semaphore = asyncio.Semaphore(config.JOB_CONCURRENCY)
 render_semaphore = asyncio.Semaphore(config.RENDER_CONCURRENCY)
 
 # Словарь: user_id -> CancellationToken для отмены задачи
-_cancel_tokens: dict[int, CancellationToken] = {}
+# Активные токены отмены по job_id (не по user_id): отмена не заденет
+# другие генерации пользователя.
+_cancel_tokens: dict[str, CancellationToken] = {}
 
 # Маппинг этапа (префикс эмодзи в notify) -> статус job в БД
 STAGE_TO_JOB_STATUS = {
@@ -169,9 +171,10 @@ def after_video_kb() -> InlineKeyboardMarkup:
     ])
 
 
-def cancel_kb() -> InlineKeyboardMarkup:
+def cancel_kb(job_id: str | None = None) -> InlineKeyboardMarkup:
+    data = f"cancel:{job_id}" if job_id else "cancel"
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="❌ Отменить", callback_data="cancel")],
+        [InlineKeyboardButton(text="❌ Отменить", callback_data=data)],
     ])
 
 
@@ -286,12 +289,18 @@ async def cb_val(call: CallbackQuery) -> None:
     )
 
 
-@dp.callback_query(F.data == "cancel")
+@dp.callback_query(F.data.startswith("cancel"))
 async def cb_cancel(call: CallbackQuery) -> None:
     await call.answer("Отменяю генерацию…")
-    token = _cancel_tokens.get(call.from_user.id)
-    if token:
-        token.cancel()
+    job_id = call.data.split(":", 1)[1] if ":" in call.data else None
+    if job_id:
+        token = _cancel_tokens.get(job_id)
+        if token:
+            token.cancel()
+    else:
+        # Старая кнопка без job_id: отменяем любую активную генерацию пользователя
+        for token in _cancel_tokens.values():
+            token.cancel()
     try:
         await call.message.edit_text("❌ Генерация отменена.", reply_markup=main_menu_kb())
     except Exception:
@@ -325,9 +334,9 @@ async def _handle(message: Message, text: str) -> None:
     job_id = db.next_job_id()
 
     async with job_semaphore:
-        status_msg = await message.answer("🔄 Ставлю задачу в очередь…", reply_markup=cancel_kb())
+        status_msg = await message.answer("🔄 Ставлю задачу в очередь…", reply_markup=cancel_kb(job_id))
         token = CancellationToken()
-        _cancel_tokens[message.from_user.id] = token
+        _cancel_tokens[job_id] = token
 
         async def notify(status: str) -> None:
             logger.info("[%s] [user %s] %s", job_id, message.from_user.id, status)
@@ -340,7 +349,7 @@ async def _handle(message: Message, text: str) -> None:
                         pass
                     break
             try:
-                await status_msg.edit_text(status, reply_markup=cancel_kb())
+                await status_msg.edit_text(status, reply_markup=cancel_kb(job_id))
             except Exception:
                 pass
 
@@ -437,7 +446,7 @@ async def _handle(message: Message, text: str) -> None:
             except Exception:
                 pass
         finally:
-            _cancel_tokens.pop(message.from_user.id, None)
+            _cancel_tokens.pop(job_id, None)
             remove_tree(work_dir)
 
 

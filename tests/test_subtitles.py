@@ -244,3 +244,123 @@ class TestWhisperOptional:
         timings = build_timings(["a", "bbb"], 4.0)
         assert abs(timings[0][1] - 1.0) < 0.01
         assert abs(timings[1][1] - 4.0) < 0.01
+
+
+class TestMatchPhraseToWords:
+    """P1: расширенное покрытие _match_phrase_to_words (forced alignment)."""
+
+    def test_exact_sequence(self):
+        from subtitles.alignment import _match_phrase_to_words
+        words = [
+            {"text": "привет", "start": 0.1, "end": 0.4},
+            {"text": "мир", "start": 0.4, "end": 0.8},
+        ]
+        start, end, idx = _match_phrase_to_words(["привет", "мир"], words, 0)
+        assert start == 0.1
+        assert end == 0.8
+        assert idx == 1
+
+    def test_skip_unmatched_words(self):
+        """Пропускает слова, которых нет во фразе (перескок)."""
+        from subtitles.alignment import _match_phrase_to_words
+        words = [
+            {"text": "мусор", "start": 0.0, "end": 0.1},
+            {"text": "привет", "start": 0.1, "end": 0.4},
+            {"text": "мир", "start": 0.4, "end": 0.8},
+        ]
+        start, end, idx = _match_phrase_to_words(["привет", "мир"], words, 0)
+        assert start == 0.1
+        assert end == 0.8
+
+    def test_no_match_returns_none(self):
+        from subtitles.alignment import _match_phrase_to_words
+        words = [{"text": "a", "start": 0.0, "end": 0.5}]
+        start, end, _ = _match_phrase_to_words(["привет"], words, 0)
+        assert start is None
+        assert end is None
+
+    def test_fuzzy_gpt_match(self):
+        """gpt фраза матчится с 'GPT-4' из ASR."""
+        from subtitles.alignment import _match_phrase_to_words
+        words = [{"text": "GPT-4", "start": 0.2, "end": 0.7}]
+        start, end, _ = _match_phrase_to_words(["gpt"], words, 0)
+        assert start == 0.2
+        assert end == 0.7
+
+
+class TestWordsToPhraseTimings:
+    """P1: karaoke — разбивка word timestamps по фразам."""
+
+    def test_karaoke_split(self):
+        from subtitles.alignment import words_to_phrase_timings
+        word_ts = [
+            {"word": "первое", "start": 0.0, "end": 0.3},
+            {"word": "предложение", "start": 0.3, "end": 0.7},
+            {"word": "второе", "start": 0.8, "end": 1.1},
+        ]
+        result = words_to_phrase_timings(["первое предложение", "второе"], word_ts)
+        assert result is not None
+        assert len(result) == 2
+        assert len(result[0]) == 2
+        assert result[0][0][0] == "первое"
+        assert result[1][0][0] == "второе"
+
+    def test_karaoke_empty_input(self):
+        from subtitles.alignment import words_to_phrase_timings
+        assert words_to_phrase_timings(["x"], []) is None
+
+    def test_karaoke_unmatched_phrase_empty(self):
+        from subtitles.alignment import words_to_phrase_timings
+        word_ts = [{"word": "тест", "start": 0.0, "end": 0.5}]
+        result = words_to_phrase_timings(["совсем другое слово"], word_ts)
+        assert result is None
+
+    def test_karaoke_empty_phrase_skipped(self):
+        from subtitles.alignment import words_to_phrase_timings
+        word_ts = [{"word": "тест", "start": 0.0, "end": 0.5}]
+        result = words_to_phrase_timings(["", "тест"], word_ts)
+        assert result is not None
+        assert result[0] == []
+        assert len(result[1]) == 1
+
+
+class TestTranscribeTimeout:
+    """P1: таймаут транскрипции и fallback на None."""
+
+    def test_build_timings_aligned_timeout_returns_none(self, monkeypatch):
+        """Whisper висит дольше лимита — функция возвращает None (не висит)."""
+        import asyncio
+        import subtitles.alignment as al
+        import config
+
+        monkeypatch.setattr(config, "ALIGNMENT_TIMEOUT_SECONDS", 0.1)
+
+        def fake_transcribe_with_timeout(audio_path, language):
+            async def _slow():
+                await asyncio.sleep(30)  # дольше таймаута
+                return {"segments": []}
+            return asyncio.wait_for(_slow(), timeout=config.ALIGNMENT_TIMEOUT_SECONDS)
+
+        old = al._transcribe_with_timeout
+        try:
+            al._transcribe_with_timeout = fake_transcribe_with_timeout
+            res = asyncio.run(al.build_timings_aligned(["тест"], "/tmp/x.wav"))
+            assert res is None
+        finally:
+            al._transcribe_with_timeout = old
+
+    def test_build_timings_aligned_no_words_none(self, monkeypatch):
+        """Whisper вернул сегменты без слов — None."""
+        import asyncio
+        import subtitles.alignment as al
+
+        async def fake_transcribe(audio_path, language):
+            return {"segments": [{"words": []}]}
+
+        old = al._transcribe_with_timeout
+        try:
+            al._transcribe_with_timeout = fake_transcribe
+            res = asyncio.run(al.build_timings_aligned(["тест"], "/tmp/x.wav"))
+            assert res is None
+        finally:
+            al._transcribe_with_timeout = old

@@ -50,6 +50,18 @@ class TestDatabase:
         assert job["output_path"] == "/tmp/x.mp4"
         assert job["completed_at"] is not None
 
+    def test_cancelled_saved_to_sqlite(self):
+        """P0: отменённый job сохраняет статус cancelled в SQLite."""
+        self.db.create_job("JOB-9", 1, "text")
+        self.db.finish_job("JOB-9", "cancelled", error="Отменено пользователем")
+        job = self.db.get_job("JOB-9")
+        assert job["status"] == "cancelled"
+        assert job["error"] == "Отменено пользователем"
+        assert job["completed_at"] is not None
+        # Не попадает в "историю готовых видео" (только completed)
+        history = self.db.list_history(1, limit=10)
+        assert all(h["status"] == "completed" for h in history)
+
     def test_set_stage(self):
         from storage.database import JOB_STATUSES
         self.db.create_job("JOB-1", 1, "text")

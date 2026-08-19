@@ -1,0 +1,51 @@
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+    branches: [master]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ["3.11", "3.12", "3.13"]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+
+      - name: Install system deps (ffmpeg for smoke tests)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ffmpeg
+
+      - name: Install Python deps
+        run: |
+          pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install -e .[dev]
+
+      - name: Ruff lint
+        run: ruff check .
+
+      - name: Compile check
+        run: python -m compileall -q .
+
+      - name: Run tests
+        env:
+          # Пустые ключи — тесты не ходят в сеть (все моки/фейки)
+          TELEGRAM_BOT_TOKEN: ""
+          ALLOWED_USER_ID: ""
+          YANDEX_API_KEY: ""
+          PEXELS_API_KEY: ""
+          PIXABAY_API_KEY: ""
+          LLM_API_KEY: ""
+        run: pytest -q

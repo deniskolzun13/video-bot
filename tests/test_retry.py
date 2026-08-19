@@ -166,3 +166,47 @@ class TestRetry:
                 always_fails, retries=4, base_delay=1.0, max_delay=8.0
             ))
         assert delays == [1.0, 2.0, 4.0]
+
+
+class TestAuthHeaders:
+    """P1: LLM_AUTH_TYPE=auto не зависит от префикса ключа."""
+
+    def _headers(self, auth_type, key):
+        from ai.openai_compat import OpenAICompatProvider
+        provider = OpenAICompatProvider(api_key=key, auth_type=auth_type)
+        return provider._headers()
+
+    def test_auto_uses_bearer_even_for_non_sk_key(self):
+        """auto всегда Bearer — даже для ключа без префикса sk- (YandexGPT)."""
+        h = self._headers("auto", "AQVN-xyz")
+        assert h == {"Authorization": "Bearer AQVN-xyz"}
+
+    def test_auto_uses_bearer_for_sk_key(self):
+        h = self._headers("auto", "sk-abc")
+        assert h == {"Authorization": "Bearer sk-abc"}
+
+    def test_bearer_explicit(self):
+        h = self._headers("bearer", "sk-abc")
+        assert h == {"Authorization": "Bearer sk-abc"}
+
+    def test_api_key_explicit(self):
+        h = self._headers("api-key", "AQVN-xyz")
+        assert h == {"Authorization": "Api-Key AQVN-xyz"}
+
+    def test_raw_explicit(self):
+        h = self._headers("raw", "my-token")
+        assert h == {"Authorization": "my-token"}
+
+    def test_custom_header_name(self):
+        from ai.openai_compat import OpenAICompatProvider
+        provider = OpenAICompatProvider(api_key="k", auth_type="bearer", auth_header="X-API-Key")
+        assert provider._headers() == {"X-API-Key": "Bearer k"}
+
+    def test_unknown_auth_type_raises(self):
+        from ai.openai_compat import OpenAICompatProvider
+        from ai.base import LLMError
+        import pytest as _pytest
+
+        provider = OpenAICompatProvider(api_key="k", auth_type="bogus")
+        with _pytest.raises(LLMError):
+            provider._headers()
