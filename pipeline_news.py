@@ -168,7 +168,10 @@ async def _build_segment_audio(
         key = _block_key(block_type, news_id)
         await _notify(notify, f"🎙 Озвучка {idx + 1}/{total}…", cancel_token)
         try:
-            audio_path, duration = await tts_fn(text, tts_dir / key)
+            if asyncio.iscoroutinefunction(tts_fn):
+                audio_path, duration = await tts_fn(text, tts_dir / key)
+            else:
+                audio_path, duration = await asyncio.to_thread(tts_fn, text, tts_dir / key)
         except Exception as exc:
             logger.error("TTS сегмента %s не удался: %s", key, exc)
             raise

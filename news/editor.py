@@ -30,8 +30,8 @@ PROMPT_EDIT = (
     "(предметы/сцены, НЕ абстракции).\n"
     "7. importance — число от 0.1 до 1.0 (насколько новость важна/интересна).\n\n"
     "Формат ответа:\n"
-    '{\n  "title": "...",\n  "edited_text": "...",\n  "summary": "...",\n'
-    '  "keywords": ["..."],\n  "importance": 0.9,\n  "category": "tech|business|science|world|sport|games|other"\n}\n\n'
+    '{{\n  "title": "...",\n  "edited_text": "...",\n  "summary": "...",\n'
+    '  "keywords": ["..."],\n  "importance": 0.9,\n  "category": "tech|business|science|world|sport|games|other"\n}}\n\n'
     "Новость:\n{text}"
 )
 
