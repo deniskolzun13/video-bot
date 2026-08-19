@@ -1,4 +1,5 @@
 """SQLite-хранилище: users, jobs, videos."""
+import json
 import sqlite3
 import threading
 import time
@@ -86,7 +87,8 @@ CREATE TABLE IF NOT EXISTS timeline_items (
     end REAL DEFAULT 0,
     duration REAL DEFAULT 0,
     text TEXT,
-    audio_path TEXT
+    audio_path TEXT,
+    phrase_timings TEXT
 );
 
 CREATE INDEX IF NOT EXISTS idx_jobs_user_id ON jobs(user_id);
@@ -117,6 +119,16 @@ class Database:
         self._conn.row_factory = sqlite3.Row
         with self._conn:
             self._conn.executescript(_SCHEMA)
+        self._migrate()
+
+    def _migrate(self) -> None:
+        """Лёгкие миграции: ALTER TABLE для колонок, добавленных в новых версиях."""
+        cols = {r[1] for r in self._conn.execute("PRAGMA table_info(timeline_items)")}
+        if "phrase_timings" not in cols:
+            with self._conn:
+                self._conn.execute(
+                    "ALTER TABLE timeline_items ADD COLUMN phrase_timings TEXT"
+                )
 
     def close(self) -> None:
         try:
@@ -279,8 +291,6 @@ class Database:
 
     def save_news_item(self, batch_id: str, item) -> None:
         """Сохраняет NewsItem. keywords — JSON-строка."""
-        import json
-
         with _DB_LOCK:
             with self._conn:
                 self._conn.execute(
@@ -299,10 +309,13 @@ class Database:
             with self._conn:
                 self._conn.execute(
                     "INSERT INTO timeline_items (batch_id, item_type, news_id, start, end, "
-                    "duration, text, audio_path) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                    "duration, text, audio_path, phrase_timings) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
                     (
                         batch_id, item.type, item.news_id, item.start, item.end,
                         item.duration, item.text, item.audio_path,
+                        json.dumps(item.phrase_timings, ensure_ascii=False)
+                        if getattr(item, "phrase_timings", None)
+                        else None,
                     ),
                 )
 
@@ -320,7 +333,11 @@ class Database:
                 "SELECT * FROM timeline_items WHERE batch_id = ? ORDER BY start",
                 (batch_id,),
             ).fetchall()
-            return [dict(r) for r in rows]
+            items = [dict(r) for r in rows]
+            for item in items:
+                raw = item.get("phrase_timings")
+                item["phrase_timings"] = json.loads(raw) if raw else None
+            return items
 
 
 # Единый инстанс на процесс (глобальное состояние допустимо для БД).

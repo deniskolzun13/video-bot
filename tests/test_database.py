@@ -1,6 +1,7 @@
 """Unit tests для SQLite-хранилища (временная БД, без реальных файлов проекта)."""
 import tempfile
 
+from news.models import TimelineItem
 from storage.database import Database
 
 
@@ -98,3 +99,29 @@ class TestDatabase:
         history = self.db.list_history(1)
         assert len(history) == 1
         assert history[0]["duration"] == 30.0
+
+    def test_news_batch_roundtrip(self):
+        batch_id = "BATCH-1"
+        self.db.create_news_batch(batch_id, 1, 3)
+        batch = self.db.get_news_batch(batch_id)
+        assert batch is not None
+        assert batch["status"] == "queued"
+
+    def test_timeline_item_phrase_timings_roundtrip(self):
+        """PHASE 6: phrase_timings (word-level ASR) сохраняются и читаются."""
+        item = TimelineItem(
+            id="n1", type="news", news_id=1, start=0.5, end=3.5, duration=3.0,
+            text="Новость", audio_path="/tmp/a.mp3",
+            phrase_timings=[{"start": 0.1, "end": 0.8, "text": "Новость"}],
+        )
+        self.db.save_timeline_item("BATCH-1", item)
+        items = self.db.list_timeline_items("BATCH-1")
+        assert len(items) == 1
+        assert items[0]["phrase_timings"] == [{"start": 0.1, "end": 0.8, "text": "Новость"}]
+
+    def test_timeline_item_without_phrase_timings(self):
+        item = TimelineItem(id="t1", type="transition", news_id=1,
+                            start=0.0, end=1.0, duration=1.0, text="Переход")
+        self.db.save_timeline_item("BATCH-1", item)
+        items = self.db.list_timeline_items("BATCH-1")
+        assert items[0]["phrase_timings"] is None
