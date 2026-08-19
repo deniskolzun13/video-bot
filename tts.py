@@ -9,6 +9,7 @@ import httpx
 
 import config
 from subtitles import split_sentences
+from utils.retry import RetryableError, is_retryable_status, retry_async
 
 logger = logging.getLogger(__name__)
 
@@ -184,43 +185,55 @@ def split_into_chunks(text: str, limit: int = config.TTS_MAX_CHUNK) -> list[str]
     return chunks
 
 
-async def _synthesize_chunk(client: httpx.AsyncClient, chunk: str, dest: Path) -> None:
+async def _synthesize_chunk(client: httpx.AsyncClient, chunk: str, dest: Path,
+                            voice: str | None = None, speed: float | None = None) -> None:
     params = {
         "text": chunk,
         "lang": config.TTS_LANG,
-        "voice": config.TTS_VOICE,
+        "voice": voice or config.TTS_VOICE,
         "emotion": config.TTS_EMOTION,
-        "speed": str(config.TTS_SPEED),
+        "speed": str(speed if speed is not None else config.TTS_SPEED),
         "format": "lpcm",
         "sampleRateHertz": str(config.TTS_SAMPLE_RATE),
     }
     if config.YANDEX_FOLDER_ID:
         params["folderId"] = config.YANDEX_FOLDER_ID
-    response = await client.post(TTS_URL, params=params, headers=_auth_headers())
-    if response.status_code != 200:
-        try:
-            err_detail = response.json().get("error", {}).get("message", "")
-        except Exception:
-            err_detail = ""
-        status_messages = {
-            401: "Неверный API-ключ Yandex SpeechKit. Проверьте TELEGRAM_BOT_TOKEN и YANDEX_API_KEY.",
-            403: "Доступ к SpeechKit запрещён. Проверьте тариф и доступность сервиса.",
-            429: "Превышен лимит запросов к SpeechKit. Подождите несколько минут.",
-            503: "Сервис SpeechKit временно недоступен. Попробуйте позже.",
-        }
-        user_msg = status_messages.get(response.status_code, "Ошибка синтеза речи. Попробуйте позже.")
-        if err_detail:
-            user_msg += f" ({err_detail})"
+
+    async def _do() -> None:
+        response = await client.post(TTS_URL, params=params, headers=_auth_headers())
+        if response.status_code != 200:
+            if is_retryable_status(response.status_code):
+                raise RetryableError(f"TTS status {response.status_code}", response.status_code)
+            try:
+                err_detail = response.json().get("error", {}).get("message", "")
+            except Exception:
+                err_detail = ""
+            status_messages = {
+                401: "Неверный API-ключ Yandex SpeechKit. Проверьте TELEGRAM_BOT_TOKEN и YANDEX_API_KEY.",
+                403: "Доступ к SpeechKit запрещён. Проверьте тариф и доступность сервиса.",
+            }
+            user_msg = status_messages.get(response.status_code, "Ошибка синтеза речи. Попробуйте позже.")
+            if err_detail:
+                user_msg += f" ({err_detail})"
+            raise APIError("Yandex SpeechKit", user_msg, response.status_code)
+        dest.write_bytes(response.content)
+
+    try:
+        await retry_async(_do, retries=3, base_delay=1.0)
+    except RetryableError as exc:
         raise APIError(
             "Yandex SpeechKit",
-            user_msg,
-            response.status_code,
-        )
-    dest.write_bytes(response.content)
+            "Сервис SpeechKit временно недоступен. Попробуйте позже.",
+            exc.status_code,
+        ) from exc
 
 
-async def synthesize(text: str, work_dir: Path) -> tuple[Path, float]:
-    """Синтез речи. Возвращает (путь к mp3, длительность в секундах)."""
+async def synthesize(text: str, work_dir: Path, voice: str | None = None, speed: float | None = None) -> tuple[Path, float]:
+    """Синтез речи. Возвращает (путь к mp3, длительность в секундах).
+
+    voice/speed — переопределения настроек пользователя (если заданы, берутся
+    вместо значений из config).
+    """
     work_dir = Path(work_dir)
     work_dir.mkdir(parents=True, exist_ok=True)
     chunks = split_into_chunks(text)
@@ -230,7 +243,7 @@ async def synthesize(text: str, work_dir: Path) -> tuple[Path, float]:
             logger.info("TTS: чанк %d/%d (%d символов)", i + 1, len(chunks), len(chunk))
             pcm = work_dir / f"tts_{i:03d}.pcm"
             try:
-                await _synthesize_chunk(client, chunk, pcm)
+                await _synthesize_chunk(client, chunk, pcm, voice=voice, speed=speed)
             except APIError as exc:
                 logger.error("TTS API error: %s (status=%d)", exc, exc.status_code)
                 raise TTSError(str(exc), exc.details or "") from exc

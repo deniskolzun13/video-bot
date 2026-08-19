@@ -65,9 +65,39 @@ TTS_CROSSFADE = float(getenv("TTS_CROSSFADE", "0.05"))
 # Отключить кроссфейд (склейка внахлёст) — для отладки/контроля
 TTS_DISABLE_CROSSFADE = getenv("TTS_DISABLE_CROSSFADE", "").lower() in ("1", "true", "yes")
 
+# --- LLM (AI provider abstraction) ---
+# LLM_PROVIDER: openai (OpenAI-совместимый API: OpenAI, OpenRouter, YandexGPT, ...)
+LLM_PROVIDER = getenv("LLM_PROVIDER", "openai")
 LLM_API_KEY = getenv("LLM_API_KEY")
 LLM_BASE_URL = getenv("LLM_BASE_URL", "https://api.openai.com/v1")
 LLM_MODEL = getenv("LLM_MODEL", "gpt-4o-mini")
+# Таймаут и ретраи для LLM-запросов
+LLM_TIMEOUT = float(getenv("LLM_TIMEOUT", "60"))
+LLM_RETRIES = int(getenv("LLM_RETRIES", "2"))
+
+# --- Data storage ---
+DATA_DIR = getenv("DATA_DIR", "data")
+DB_PATH = getenv("DB_PATH", f"{DATA_DIR}/video_bot.db")
+
+# --- Кэш (v2) ---
+CACHE_ENABLED = getenv("CACHE_ENABLED", "true").lower() in ("1", "true", "yes")
+
+# --- Сценарий / сцены ---
+# SCRIPT_GENERATION: off — использовать текст как есть (по умолчанию, не переписываем
+#   пользовательский текст), on — генерировать hook/body/ending из новости
+SCRIPT_GENERATION = getenv("SCRIPT_GENERATION", "off").lower()
+# Число сцен для сценарного плана
+SCENES_MAX = int(getenv("SCENES_MAX", "12"))
+
+# --- Стиль субтитров ---
+# classic / tiktok / news / gaming / minimal
+SUBTITLE_STYLE = getenv("SUBTITLE_STYLE", "tiktok")
+
+# --- Fallback на изображения ---
+# IMAGE_FALLBACK=true — если видео не найдено, использовать стоковые изображения
+IMAGE_FALLBACK = getenv("IMAGE_FALLBACK", "true").lower() in ("1", "true", "yes")
+# Секунд на одно изображение при Ken Burns-эффекте
+IMAGE_KEN_BURNS = float(getenv("IMAGE_KEN_BURNS", "4.0"))
 
 VIDEO_WIDTH = 1080
 VIDEO_HEIGHT = 1920

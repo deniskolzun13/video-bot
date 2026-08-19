@@ -1,6 +1,5 @@
 """Unit tests for subtitles.py"""
 
-import pytest
 
 from subtitles import (
     split_sentences,

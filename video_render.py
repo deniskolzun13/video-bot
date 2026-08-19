@@ -1,3 +1,4 @@
+import json
 import logging
 import re
 import subprocess
@@ -128,3 +129,67 @@ def render_video(
         raise ValueError(f"Ошибка ffmpeg при рендере: {result.stderr[-1000:]}")
     logger.info("Готово: %s", out_path)
     return out_path
+
+
+def probe_video(path: Path) -> dict:
+    """Возвращает информацию о видео через ffprobe (JSON). Пусто при ошибке."""
+    path = Path(path)
+    result = subprocess.run(
+        ["ffprobe", "-v", "quiet", "-print_format", "json",
+         "-show_streams", "-show_format", str(path)],
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        return {}
+    try:
+        return json.loads(result.stdout)
+    except json.JSONDecodeError:
+        return {}
+
+
+def validate_output(path: Path) -> dict:
+    """Проверяет готовый MP4: существует, размер > 0, есть video+audio stream,
+    разрешение 1080x1920, длительность > 0, читается ffmpeg.
+    Возвращает {ok: bool, reasons: [...], duration, resolution}.
+    """
+    path = Path(path)
+    reasons: list[str] = []
+
+    if not path.exists():
+        return {"ok": False, "reasons": ["файл не существует"], "duration": 0, "resolution": None}
+    if path.stat().st_size <= 0:
+        return {"ok": False, "reasons": ["файл пустой"], "duration": 0, "resolution": None}
+
+    info = probe_video(path)
+    streams = info.get("streams", [])
+    video_streams = [s for s in streams if s.get("codec_type") == "video"]
+    audio_streams = [s for s in streams if s.get("codec_type") == "audio"]
+
+    if not video_streams:
+        reasons.append("нет видео-потока")
+    if not audio_streams:
+        reasons.append("нет аудио-потока")
+
+    try:
+        duration = float(info.get("format", {}).get("duration") or 0)
+    except (TypeError, ValueError):
+        duration = 0.0
+    if duration <= 0:
+        reasons.append("длительность <= 0")
+
+    resolution = None
+    if video_streams:
+        vs = video_streams[0]
+        width = int(vs.get("width") or 0)
+        height = int(vs.get("height") or 0)
+        resolution = (width, height)
+        if width != config.VIDEO_WIDTH or height != config.VIDEO_HEIGHT:
+            reasons.append(f"разрешение {width}x{height} вместо {config.VIDEO_WIDTH}x{config.VIDEO_HEIGHT}")
+
+    return {
+        "ok": not reasons,
+        "reasons": reasons,
+        "duration": duration,
+        "resolution": resolution,
+    }

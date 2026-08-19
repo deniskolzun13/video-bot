@@ -11,6 +11,7 @@ import httpx
 from deep_translator import GoogleTranslator
 
 import config
+from ai import create_llm_provider
 from tts import probe_duration
 
 try:
@@ -233,24 +234,13 @@ def extract_keywords_heuristic(text: str, n: int = config.KEYWORDS_COUNT) -> lis
 
 
 async def _llm_complete(prompt: str, timeout: float = 60) -> str | None:
+    """Унифицированный вызов LLM через ai-абстракцию. Возвращает None при ошибке."""
     if not config.LLM_API_KEY:
         return None
-    auth = config.LLM_API_KEY if config.LLM_API_KEY.startswith("sk-") else f"Api-Key {config.LLM_API_KEY}"
     try:
-        async with httpx.AsyncClient(timeout=timeout) as client:
-            response = await client.post(
-                f"{config.LLM_BASE_URL}/chat/completions",
-                headers={"Authorization": auth},
-                json={
-                    "model": config.LLM_MODEL,
-                    "messages": [{"role": "user", "content": prompt}],
-                    "temperature": 0,
-                },
-            )
-        if response.status_code != 200:
-            logger.warning("LLM-запрос не удался: %s", response.status_code)
-            return None
-        return response.json()["choices"][0]["message"]["content"].strip()
+        provider = create_llm_provider()
+        content = await provider.complete(prompt)
+        return content.strip() or None
     except Exception as exc:
         logger.warning("LLM-запрос не удался: %s", exc)
         return None
@@ -576,7 +566,6 @@ async def _prepare_pexels_clips(
         dest = work_dir / f"clip_{i:03d}.mp4"
 
         # Определяем наиболее релевантную тему для этой фразы
-        phrase_lower = phrase.lower()
         best_theme = None
         best_score = 0
 
