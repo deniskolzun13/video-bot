@@ -47,6 +47,17 @@ class VideoClip:
     query: str
 
 
+@dataclass
+class VideoPhoto:
+    """Стоковое фото для Ken Burns-эффекта (IMAGE_FALLBACK)."""
+
+    id: str
+    url: str
+    width: int
+    height: int
+    query: str
+
+
 class VideoSourceProvider(ABC):
     @abstractmethod
     async def search(self, query: str, per_page: int = 5) -> list[VideoClip]:
@@ -90,6 +101,7 @@ class VideoSourceProvider(ABC):
 
 class PexelsProvider(VideoSourceProvider):
     BASE_URL = "https://api.pexels.com/videos/search"
+    PHOTOS_URL = "https://api.pexels.com/v1/search"
 
     def __init__(self, api_key: str):
         if not api_key:
@@ -148,9 +160,39 @@ class PexelsProvider(VideoSourceProvider):
             )
         return clips
 
+    async def search_photos(self, query: str, per_page: int = 5) -> list[VideoPhoto]:
+        """Ищет вертикальные фото (для Ken Burns fallback)."""
+        params = {"query": query, "orientation": "portrait", "per_page": per_page}
+        headers = {"Authorization": self.api_key}
+        async with httpx.AsyncClient(timeout=60) as client:
+            response = await client.get(self.PHOTOS_URL, params=params, headers=headers)
+        if response.status_code != 200:
+            raise VideoSourceError(
+                f"Pexels фото недоступен (код {response.status_code}).",
+                f"Pexels photos error {response.status_code}: {response.text[:200]}",
+            )
+        data = response.json()
+        photos: list[VideoPhoto] = []
+        for photo in data.get("photos", []):
+            src = photo.get("src", {})
+            url = (src.get("portrait") or src.get("large") or src.get("original"))
+            if not url:
+                continue
+            photos.append(
+                VideoPhoto(
+                    id=str(photo["id"]),
+                    url=url,
+                    width=photo.get("width") or 0,
+                    height=photo.get("height") or 0,
+                    query=query,
+                )
+            )
+        return photos
+
 
 class PixabayProvider(VideoSourceProvider):
     BASE_URL = "https://pixabay.com/api/videos/"
+    PHOTOS_URL = "https://pixabay.com/api/"
 
     def __init__(self, api_key: str):
         if not api_key:
@@ -212,6 +254,39 @@ class PixabayProvider(VideoSourceProvider):
                 )
             )
         return clips
+
+    async def search_photos(self, query: str, per_page: int = 5) -> list[VideoPhoto]:
+        """Ищет фото (для Ken Burns fallback)."""
+        params = {
+            "key": self.api_key,
+            "q": query,
+            "orientation": "vertical",
+            "per_page": per_page,
+            "image_type": "photo",
+        }
+        async with httpx.AsyncClient(timeout=60) as client:
+            response = await client.get(self.PHOTOS_URL, params=params)
+        if response.status_code != 200:
+            raise VideoSourceError(
+                f"Pixabay фото недоступен (код {response.status_code}).",
+                f"Pixabay photos error {response.status_code}: {response.text[:200]}",
+            )
+        data = response.json()
+        photos: list[VideoPhoto] = []
+        for photo in data.get("hits", []):
+            url = photo.get("webformatURL") or photo.get("largeImageURL")
+            if not url:
+                continue
+            photos.append(
+                VideoPhoto(
+                    id=str(photo["id"]),
+                    url=url,
+                    width=photo.get("imageWidth") or 0,
+                    height=photo.get("imageHeight") or 0,
+                    query=query,
+                )
+            )
+        return photos
 
 
 def extract_keywords_heuristic(text: str, n: int = config.KEYWORDS_COUNT) -> list[str]:

@@ -52,5 +52,8 @@
 
 ## Замечания
 
-- `IMAGE_FALLBACK`/`IMAGE_KEN_BURNS` — настроечный резерв (Ken Burns не используется в текущем пайплайне; fallback-фон — анимированный градиент).
+- Все разделы ТЗ v2.0.1 реализованы. Ken Burns fallback (`IMAGE_FALLBACK`,
+  `IMAGE_KEN_BURNS`) реализован: `search_photos` в Pexels/Pixabay-провайдерах,
+  `make_photo_clip` (zoompan) в `video/fallback.py`, порядок видео → фото → градиент
+  в `VideoSelector.select`. Тесты: `tests/test_ken_burns.py` (6).
 - Отчётные артефакты: `.env` и данные не коммитятся (в `.gitignore`).

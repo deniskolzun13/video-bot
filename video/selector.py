@@ -15,12 +15,13 @@ from pathlib import Path
 import config
 from script.scene_planner import Scene
 from video.downloader import download_clip
-from video.fallback import make_fallback_clip
+from video.fallback import make_fallback_clip, make_photo_clip
 from video.ranking import score_clip
 from video_source import (
     PixabayProvider,
     SteamProvider,
     VideoClip,
+    VideoPhoto,
     VideoSourceError,
 )
 
@@ -107,7 +108,7 @@ class VideoSelector:
         """Возвращает [(путь, длительность_сегмента, сдвиг)] для каждой сцены.
 
         Никогда не поднимает исключение из-за отсутствия видео:
-        последняя надежда — сгенерированный фон.
+        видео -> стоковое фото (Ken Burns, если IMAGE_FALLBACK=true) -> фон.
         """
         result: list[tuple[Path, float, float]] = []
         for i, (scene, (start, end)) in enumerate(zip(scenes, timings)):
@@ -116,8 +117,13 @@ class VideoSelector:
             clip = await self._pick_best(scene, need)
 
             if clip is None:
-                # Fallback: сгенерированный фон
-                logger.warning("Сцена %d: видео не найдено, использую fallback-фон", i)
+                if getattr(config, "IMAGE_FALLBACK", False):
+                    made = await self._photo_fallback(scene, dest, need)
+                    if made:
+                        result.append((dest, need, 0.0))
+                        continue
+                # Последняя надежда: сгенерированный фон
+                logger.warning("Сцена %d: видео и фото не найдены, использую фон", i)
                 make_fallback_clip(dest, need, i)
                 result.append((dest, need, 0.0))
                 continue
@@ -129,11 +135,56 @@ class VideoSelector:
                 result.append((dest, need, 0.0))
                 self.used_ids.add(clip.id)
             except ValueError as exc:
-                logger.warning("Не удалось скачать клип %d (%s), fallback-фон", i, exc)
+                logger.warning("Не удалось скачать клип %d (%s), фото/фон", i, exc)
+                if getattr(config, "IMAGE_FALLBACK", False):
+                    made = await self._photo_fallback(scene, dest, need)
+                    if made:
+                        result.append((dest, need, 0.0))
+                        continue
                 make_fallback_clip(dest, need, i)
                 result.append((dest, need, 0.0))
 
         return result
+
+    async def _photo_fallback(self, scene: Scene, dest: Path, need: float) -> bool:
+        """Ken Burns по стоковому фото. True — если клип создан."""
+        photo = await self._pick_photo(scene)
+        if photo is None:
+            return False
+        try:
+            make_photo_clip(dest, photo.url, need)
+            logger.info("Ken Burns fallback для сцены '%s' (фото id=%s)",
+                        scene.visual[:30], photo.id)
+            return True
+        except Exception as exc:
+            logger.warning("Ken Burns fallback не удался (%s), фон", exc)
+            return False
+
+    async def _pick_photo(self, scene: Scene) -> VideoPhoto | None:
+        """Ищет вертикальное фото: Pexels -> Pixabay."""
+        query = scene.visual or (scene.keywords[0] if scene.keywords else None)
+        if not query:
+            return None
+        providers = [self.provider]
+        if not isinstance(self.provider, SteamProvider) and config.PIXABAY_API_KEY:
+            providers.append(PixabayProvider(config.PIXABAY_API_KEY))
+        for provider in providers:
+            search = getattr(provider, "search_photos", None)
+            if search is None:
+                continue
+            try:
+                photos = await search(query, per_page=8)
+                if photos:
+                    # Отдаём первое вертикальное/самое близкое к 9:16
+                    photos.sort(
+                        key=lambda p: abs((p.height / max(p.width, 1)) - 16 / 9)
+                        if p.height >= p.width else 1e9
+                    )
+                    return photos[0]
+            except (VideoSourceError, ValueError, Exception) as exc:
+                logger.warning("Поиск фото '%s' у %s не удался: %s",
+                               query, provider.__class__.__name__, exc)
+        return None
 
     async def _pick_best(self, scene: Scene, min_duration: float) -> VideoClip | None:
         """Ранжирует кандидатов и возвращает лучшего.
