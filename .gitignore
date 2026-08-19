@@ -1,6 +1,12 @@
 .env
 __pycache__/
 *.pyc
+*.log
 work/
 output/
+data/
 .venv/
+cache/
+music/
+.pytest_cache/
+.ruff_cache/

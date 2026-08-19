@@ -11,9 +11,24 @@ import httpx
 from deep_translator import GoogleTranslator
 
 import config
+from ai import create_llm_provider
 from tts import probe_duration
 
+try:
+    from cache import get_cached, put_to_cache
+except ImportError:
+    get_cached = put_to_cache = None
+
+from prompts import PROMPT_EXTRACT_KEYWORDS, PROMPT_EXTRACT_GAME_NAME
+
 logger = logging.getLogger(__name__)
+
+
+class VideoSourceError(Exception):
+    """Ошибка поиска/скачивания видео — сообщение для пользователя."""
+    def __init__(self, message: str, details: str = ""):
+        super().__init__(message)
+        self.details = details
 
 STOPWORDS = set(
     """и в во не что он на я с со как а то все она так его но да ты к у же вы за бы по
@@ -45,14 +60,43 @@ class VideoSourceProvider(ABC):
     async def search(self, query: str, per_page: int = 5) -> list[VideoClip]:
         ...
 
+    def _cache_key(self, clip: VideoClip) -> str:
+        """Ключ кэша: провайдер:запрос:id"""
+        provider_name = self.__class__.__name__.replace("Provider", "").lower()
+        return f"{provider_name}:{clip.query}:{clip.id}"
+
     async def download(self, clip: VideoClip, dest: Path) -> Path:
         dest.parent.mkdir(parents=True, exist_ok=True)
+
+        # Проверяем кэш
+        cache_key = self._cache_key(clip)
+        if get_cached:
+            cached = get_cached(cache_key, self.__class__.__name__)
+            if cached and cached.exists():
+                try:
+                    import shutil
+                    shutil.copy2(cached, dest)
+                    logger.info("Кэш HIT: %s", cache_key)
+                    return dest
+                except Exception:
+                    pass
+
+        # Скачиваем
         async with httpx.AsyncClient(timeout=180) as client:
             async with client.stream("GET", clip.url, follow_redirects=True) as response:
                 response.raise_for_status()
                 with open(dest, "wb") as f:
                     async for chunk in response.aiter_bytes():
                         f.write(chunk)
+
+        # Сохраняем в кэш
+        if put_to_cache:
+            try:
+                cache_key_str = self._cache_key(clip)
+                put_to_cache(cache_key_str, self.__class__.__name__, dest)
+            except Exception as exc:
+                logger.warning("Не удалось сохранить в кэш: %s", exc)
+
         return dest
 
 
@@ -61,7 +105,7 @@ class PexelsProvider(VideoSourceProvider):
 
     def __init__(self, api_key: str):
         if not api_key:
-            raise ValueError("Задай PEXELS_API_KEY в .env")
+            raise VideoSourceError("Не задан PEXELS_API_KEY в настройках")
         self.api_key = api_key
 
     async def search(self, query: str, per_page: int = 5) -> list[VideoClip]:
@@ -70,7 +114,19 @@ class PexelsProvider(VideoSourceProvider):
         async with httpx.AsyncClient(timeout=60) as client:
             response = await client.get(self.BASE_URL, params=params, headers=headers)
         if response.status_code != 200:
-            raise ValueError(f"Pexels вернул ошибку {response.status_code}: {response.text[:300]}")
+            status_messages = {
+                401: "Неверный PEXELS_API_KEY. Проверьте ключ.",
+                403: "Доступ к Pexels запрещён. Проверьте тариф.",
+                429: "Превышен лимит запросов к Pexels. Подождите минуту.",
+            }
+            user_msg = status_messages.get(
+                response.status_code,
+                f"Pexels API недоступен (код {response.status_code}). Попробуйте позже.",
+            )
+            raise VideoSourceError(
+                user_msg,
+                f"Pexels API error {response.status_code}: {response.text[:200]}",
+            )
         data = response.json()
         clips: list[VideoClip] = []
         for video in data.get("videos", []):
@@ -80,17 +136,87 @@ class PexelsProvider(VideoSourceProvider):
             ]
             if not files:
                 continue
+            # Фильтруем по минимальному разрешению
+            qualified = [f for f in files if (f.get("width") or 0) >= config.MIN_CLIP_WIDTH]
+            if not qualified:
+                # Если нет клипа с минимальным разрешением — пропускаем
+                continue
             chosen = None
-            for f in sorted(files, key=lambda f: f.get("width") or 0, reverse=True):
-                if (f.get("width") or 0) <= 1100 and (f.get("width") or 0) >= 480:
+            for f in sorted(qualified, key=lambda f: f.get("width") or 0, reverse=True):
+                if (f.get("width") or 0) <= 1100:
                     chosen = f
                     break
             if chosen is None:
-                chosen = files[0]
+                chosen = qualified[0]
             clips.append(
                 VideoClip(
                     id=str(video["id"]),
                     url=chosen["link"],
+                    width=chosen.get("width") or video.get("width") or 0,
+                    height=chosen.get("height") or video.get("height") or 0,
+                    duration=video.get("duration") or 0.0,
+                    query=query,
+                )
+            )
+        return clips
+
+
+class PixabayProvider(VideoSourceProvider):
+    BASE_URL = "https://pixabay.com/api/videos/"
+
+    def __init__(self, api_key: str):
+        if not api_key:
+            raise VideoSourceError("Не задан PIXABAY_API_KEY в настройках")
+        self.api_key = api_key
+
+    async def search(self, query: str, per_page: int = 5) -> list[VideoClip]:
+        params = {
+            "key": self.api_key,
+            "q": query,
+            "orientation": "vertical",
+            "per_page": per_page,
+            "video_type": "film",
+        }
+        async with httpx.AsyncClient(timeout=60) as client:
+            response = await client.get(self.BASE_URL, params=params)
+        if response.status_code != 200:
+            status_messages = {
+                401: "Неверный PIXABAY_API_KEY. Проверьте ключ.",
+                403: "Доступ к Pixabay запрещён. Проверьте тариф.",
+                429: "Превышен лимит запросов к Pixabay. Подождите минуту.",
+            }
+            user_msg = status_messages.get(
+                response.status_code,
+                f"Pixabay API недоступен (код {response.status_code}). Попробуйте позже.",
+            )
+            raise VideoSourceError(
+                user_msg,
+                f"Pixabay API error {response.status_code}: {response.text[:200]}",
+            )
+        data = response.json()
+        clips: list[VideoClip] = []
+        for video in data.get("hits", []):
+            files = video.get("videos", {})
+            # Prefer 1080p vertical, fallback to 720p, filter by min resolution
+            chosen = None
+            for quality in ("1080", "720", "large", "medium", "small", "tiny"):
+                if quality in files:
+                    f = files[quality]
+                    if f.get("url") and f.get("width", 0) >= config.MIN_CLIP_WIDTH and f.get("width", 0) <= 1100:
+                        chosen = f
+                        break
+            if chosen is None:
+                # Fallback: any file meeting min width
+                for f in files.values():
+                    if f.get("url") and f.get("width", 0) >= config.MIN_CLIP_WIDTH:
+                        chosen = f
+                        break
+            if chosen is None or not chosen.get("url"):
+                continue
+            clips.append(
+                VideoClip(
+                    id=str(video["id"]),
+                    url=chosen["url"],
                     width=chosen.get("width") or video.get("width") or 0,
                     height=chosen.get("height") or video.get("height") or 0,
                     duration=video.get("duration") or 0.0,
@@ -108,38 +234,20 @@ def extract_keywords_heuristic(text: str, n: int = config.KEYWORDS_COUNT) -> lis
 
 
 async def _llm_complete(prompt: str, timeout: float = 60) -> str | None:
+    """Унифицированный вызов LLM через ai-абстракцию. Возвращает None при ошибке."""
     if not config.LLM_API_KEY:
         return None
-    auth = config.LLM_API_KEY if config.LLM_API_KEY.startswith("sk-") else f"Api-Key {config.LLM_API_KEY}"
     try:
-        async with httpx.AsyncClient(timeout=timeout) as client:
-            response = await client.post(
-                f"{config.LLM_BASE_URL}/chat/completions",
-                headers={"Authorization": auth},
-                json={
-                    "model": config.LLM_MODEL,
-                    "messages": [{"role": "user", "content": prompt}],
-                    "temperature": 0,
-                },
-            )
-        if response.status_code != 200:
-            logger.warning("LLM-запрос не удался: %s", response.status_code)
-            return None
-        return response.json()["choices"][0]["message"]["content"].strip()
+        provider = create_llm_provider()
+        content = await provider.complete(prompt)
+        return content.strip() or None
     except Exception as exc:
         logger.warning("LLM-запрос не удался: %s", exc)
         return None
 
 
 async def extract_keywords_llm(text: str, n: int = config.KEYWORDS_COUNT) -> list[str] | None:
-    prompt = (
-        f"Ты подбираешь стоковые видео для новости. Извлеки {n} КОНКРЕТНЫХ визуальных тем "
-        f"для поиска на Pexels — предметы, сцены, места, людей за работой (например: "
-        f"computer, server room, office, circuit board, programmer typing). "
-        f"ЗАПРЕЩЕНО: абстрактные понятия и многозначные слова (model, technology, news). "
-        f"Верни ТОЛЬКО слова через запятую, на английском, без нумерации.\n\n"
-        f"{text[:2000]}"
-    )
+    prompt = PROMPT_EXTRACT_KEYWORDS.format(n=n, text=text[:2000])
     content = await _llm_complete(prompt)
     if not content:
         return None
@@ -149,12 +257,7 @@ async def extract_keywords_llm(text: str, n: int = config.KEYWORDS_COUNT) -> lis
 
 async def extract_game_name(text: str) -> str | None:
     """Название игры из текста новости (для SteamProvider)."""
-    prompt = (
-        "Из текста игровой новости извлеки название игры, как оно указано в Steam. "
-        "Ответь ТОЛЬКО названием игры, БЕЗ кавычек, скобок и пояснений. "
-        "Если игры в тексте нет — ответь одним словом «нет».\n\n"
-        f"{text[:2000]}"
-    )
+    prompt = PROMPT_EXTRACT_GAME_NAME.format(text=text[:2000])
     content = await _llm_complete(prompt)
     if not content:
         return None
@@ -166,6 +269,7 @@ async def extract_game_name(text: str) -> str | None:
 
 
 async def extract_keywords(text: str, n: int = config.KEYWORDS_COUNT) -> list[str]:
+    """Извлекает n ключевых тем для всего текста (не по фразам)."""
     keywords = await extract_keywords_llm(text, n)
     if keywords:
         return keywords
@@ -205,7 +309,7 @@ class SteamProvider(VideoSourceProvider):
 
     def __init__(self, game_name: str):
         if not game_name:
-            raise ValueError("Не указано название игры")
+            raise VideoSourceError("Не указано название игры для поиска в Steam")
         self.game_name = game_name
 
     async def search(self, query: str, per_page: int = 1) -> list[VideoClip]:
@@ -224,10 +328,16 @@ class SteamProvider(VideoSourceProvider):
                     headers=headers,
                 )
             if response.status_code != 200:
-                raise ValueError(f"Steam search вернул ошибку {response.status_code}")
+                raise VideoSourceError(
+                    "Steam API временно недоступен. Попробуйте позже.",
+                    f"Steam search error {response.status_code}",
+                )
             items = response.json().get("items") or []
             if not items:
-                return []
+                raise VideoSourceError(
+                    f"Игра «{query}» не найдена в Steam",
+                    f"No items found for query: {query}",
+                )
             appid = items[0]["id"]
             logger.info("Steam: «%s» -> appid=%s (%s)", query, appid, items[0].get("name"))
 
@@ -244,15 +354,24 @@ class SteamProvider(VideoSourceProvider):
                     headers=headers,
                 )
             if details.status_code != 200:
-                raise ValueError(f"Steam appdetails вернул ошибку {details.status_code}")
+                raise VideoSourceError(
+                    "Steam API недоступен для получения деталей игры.",
+                    f"Steam appdetails error {details.status_code}",
+                )
             data = details.json().get(str(appid), {}).get("data") or {}
             movies = data.get("movies") or []
             if not movies:
-                return []
+                raise VideoSourceError(
+                    f"У игры «{items[0].get('name', query)}» нет трейлеров в Steam",
+                    f"No movies for appid {appid}",
+                )
             movie = self._pick_best_movie(movies)
             url = movie.get("hls_h264") or movie.get("dash_h264") or ""
             if not url:
-                return []
+                raise VideoSourceError(
+                    "Не удалось получить ссылку на трейлер",
+                    f"No video URL for movie {movie.get('id')}",
+                )
             logger.info("Steam: выбран трейлер «%s»", movie.get("name") or movie.get("id"))
             return [VideoClip(id=str(movie["id"]), url=url, width=0, height=0,
                               duration=0.0, query=query)]
@@ -276,8 +395,24 @@ class SteamProvider(VideoSourceProvider):
 
         return max(movies, key=score)
 
+    def _cache_key(self, clip: VideoClip) -> str:
+        return f"steam:{self.game_name}:{clip.id}"
+
     async def download(self, clip: VideoClip, dest: Path) -> Path:
         dest.parent.mkdir(parents=True, exist_ok=True)
+
+        cache_key = self._cache_key(clip)
+        if get_cached:
+            cached = get_cached(cache_key, "SteamProvider")
+            if cached and cached.exists():
+                try:
+                    import shutil
+                    shutil.copy2(cached, dest)
+                    logger.info("Кэш HIT (Steam): %s", cache_key)
+                    return dest
+                except Exception:
+                    pass
+
         cmd = ["ffmpeg", "-y", "-v", "error", "-i", clip.url, "-map", "0:v", "-c", "copy", str(dest)]
         result = await asyncio.to_thread(
             subprocess.run, cmd, capture_output=True, text=True
@@ -290,6 +425,13 @@ class SteamProvider(VideoSourceProvider):
             )
             if result.returncode != 0:
                 raise ValueError(f"Не удалось скачать трейлер из Steam: {result.stderr[-500:]}")
+
+        if put_to_cache:
+            try:
+                put_to_cache(cache_key, "SteamProvider", dest)
+            except Exception as exc:
+                logger.warning("Не удалось сохранить в кэш (Steam): %s", exc)
+
         return dest
 
 
@@ -298,11 +440,12 @@ async def prepare_clips(
     timings: list[tuple[float, float]],
     provider: VideoSourceProvider,
     work_dir: Path,
+    keywords: list[str] | None = None,
 ) -> list[tuple[Path, float, float]]:
     """Возвращает [(путь_к_видео, длительность_сегмента, сдвиг_внутри_видео)]."""
     if isinstance(provider, SteamProvider):
         return await _prepare_steam_clips(phrases, timings, provider, work_dir)
-    return await _prepare_pexels_clips(phrases, timings, provider, work_dir)
+    return await _prepare_pexels_clips(phrases, timings, provider, work_dir, keywords)
 
 
 async def _prepare_steam_clips(
@@ -332,20 +475,157 @@ async def _prepare_steam_clips(
     return result
 
 
+def _get_min_clips_per_phrase() -> int:
+    """Минимум клипов на фразу для Pexels, иначе включаем Pixabay fallback."""
+    return getattr(config, "MIN_CLIPS_PER_PHRASE", 1)
+
+
+def _get_pexels_provider():
+    return PexelsProvider(config.PEXELS_API_KEY)
+
+
+def _get_pixabay_provider():
+    return PixabayProvider(config.PIXABAY_API_KEY)
+
+
 async def _prepare_pexels_clips(
     phrases: list[str],
     timings: list[tuple[float, float]],
     provider: VideoSourceProvider,
     work_dir: Path,
+    keywords: list[str] | None = None,
 ) -> list[tuple[Path, float, float]]:
-    """Для каждой фразы скачивает клип с Pexels."""
+    """Для каждой фразы скачивает клип с Pexels (с Pixabay fallback) на основе тематической релевантности."""
+    work_dir = Path(work_dir)
+    work_dir.mkdir(parents=True, exist_ok=True)
+
+    # Для коротких текстов (< 3 фраз) используем старую логику
+    if len(phrases) < 3:
+        return await _prepare_pexels_clips_legacy(phrases, timings, provider, work_dir)
+
+    # 1. Извлекаем глобальные темы для всего текста
+    if keywords:
+        keywords = keywords
+    else:
+        keywords = await extract_keywords(" ".join(phrases))
+        keywords = await translate_keywords(keywords)
+    if not keywords:
+        keywords = ["technology", "abstract"]
+    logger.info("Глобальные темы: %s", keywords)
+
+    # 2. Ищем клипы для каждой темы через Pexels, с Pixabay fallback
+    pexels_provider = _get_pexels_provider()
+    pixabay_provider = _get_pixabay_provider()
+    min_clips = _get_min_clips_per_phrase()
+
+    theme_clips = {}
+    used_ids = set()
+
+    async def _search_with_fallback(kw: str) -> list[VideoClip]:
+        """Сначала Pexels, если мало результатов — Pixabay."""
+        # Сначала Pexels
+        try:
+            candidates = await pexels_provider.search(kw, per_page=10)
+            fresh = [c for c in candidates if c.id not in used_ids]
+        except ValueError as exc:
+            logger.warning("Pexels поиск '%s' упал: %s", kw, exc)
+            fresh = []
+
+        # Если мало результатов — пробуем Pixabay
+        if len(fresh) < min_clips:
+            try:
+                pix_candidates = await pixabay_provider.search(kw, per_page=10)
+                pix_fresh = [c for c in pix_candidates if c.id not in used_ids]
+                fresh.extend(pix_fresh)
+                logger.info("Pixabay fallback для '%s': добавлено %d клипов", kw, len(pix_fresh))
+            except ValueError as exc:
+                logger.warning("Pixabay поиск '%s' упал: %s", kw, exc)
+
+        return fresh
+
+    for kw in keywords:
+        fresh = await _search_with_fallback(kw)
+        if fresh:
+            theme_clips[kw] = fresh
+
+    if not theme_clips:
+        # Fallback: ищем по первым ключевым словам
+        for kw in keywords[:3]:
+            fresh = await _search_with_fallback(kw)
+            if fresh:
+                theme_clips[kw] = fresh
+                break
+
+    if not theme_clips:
+        raise ValueError("Ни Pexels, ни Pixabay не вернули подходящих клипов")
+
+    # 3. Распределяем клипы по фразам на основе релевантности
+    result = []
+    for i, ((start, end), phrase) in enumerate(zip(timings, phrases)):
+        need = max(end - start, 2.0)
+        dest = work_dir / f"clip_{i:03d}.mp4"
+
+        # Определяем наиболее релевантную тему для этой фразы
+        best_theme = None
+        best_score = 0
+
+        for theme, clips in theme_clips.items():
+            theme_words = set(re.findall(r"\w+", theme.lower()))
+            phrase_words = set(re.findall(r"\w+", phrase.lower()))
+            overlap = len(theme_words & phrase_words)
+            if overlap > best_score:
+                best_score = overlap
+                best_theme = theme
+
+        if best_theme is None:
+            best_theme = max(theme_clips, key=lambda k: len(theme_clips[k]))
+
+        clip = None
+        for c in theme_clips[best_theme]:
+            if c.id not in used_ids:
+                clip = c
+                break
+
+        if clip is None:
+            for theme_clips_list in theme_clips.values():
+                for c in theme_clips_list:
+                    if c.id not in used_ids:
+                        clip = c
+                        best_theme = [k for k, v in theme_clips.items() if c in v][0]
+                        break
+                if clip:
+                    break
+
+        if clip is None:
+            raise ValueError("Не удалось найти свободный клип для фразы")
+
+        used_ids.add(clip.id)
+        try:
+            await provider.download(clip, dest)
+            logger.info("Клип %d/%d: тема=%s, запрос=%s, id=%s",
+                        i + 1, len(phrases), best_theme, clip.query, clip.id)
+            result.append((dest, need, 0.0))
+        except Exception as exc:
+            logger.warning("Не удалось скачать клип %s: %s", clip.url, exc)
+            raise ValueError(f"Не удалось скачать видео по теме «{best_theme}»: {exc}")
+
+    return result
+
+
+async def _prepare_pexels_clips_legacy(
+    phrases: list[str],
+    timings: list[tuple[float, float]],
+    provider: VideoSourceProvider,
+    work_dir: Path,
+) -> list[tuple[Path, float, float]]:
+    """Старая логика round-robin для коротких текстов."""
     work_dir = Path(work_dir)
     work_dir.mkdir(parents=True, exist_ok=True)
     keywords = await extract_keywords(" ".join(phrases))
     keywords = await translate_keywords(keywords)
     if not keywords:
         keywords = ["technology", "abstract"]
-    logger.info("Ключевые слова: %s", keywords)
+    logger.info("Ключевые слова (legacy): %s", keywords)
 
     result: list[tuple[Path, float, float]] = []
     used_ids: set[str] = set()
