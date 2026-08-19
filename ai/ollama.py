@@ -188,16 +188,14 @@ class OllamaProvider(LLMProvider):
             ) from exc
 
 
-def assert_local_llm_ok(provider: OllamaProvider | None = None) -> None:
-    """Синхронно-ish проверка: вызывается на старте бота в AI_MODE=local.
+async def assert_local_llm_ok(provider: OllamaProvider | None = None) -> None:
+    """Проверка на старте бота в AI_MODE=local.
 
     Поднимает ConfigurationError с понятным сообщением, если Ollama/модель
     недоступны. НЕ переключается на облако.
     """
-    import asyncio
-
     provider = provider or OllamaProvider()
-    check = asyncio.run(provider.health_check())
+    check = await provider.health_check()
     if not check["ok"]:
         raise ConfigurationError(
             check["message"],

@@ -694,7 +694,7 @@ async def main() -> None:
         from utils.errors import ConfigurationError
 
         try:
-            assert_local_llm_ok()
+            await assert_local_llm_ok()
             logger.info("Local LLM (Ollama) готов: %s @ %s",
                         config.OLLAMA_MODEL, config.OLLAMA_BASE_URL)
         except ConfigurationError as exc:
