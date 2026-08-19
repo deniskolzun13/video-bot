@@ -81,11 +81,11 @@ def render_video(
         if config.VIDEO_PADDING == "blur":
             chain = (
                 f"[{i}:v]split[b{i}][f{i}];"
-                f"[b{i}]scale={{width}}:{{height}}:"
+                f"[b{i}]scale={width}:{height}:"
                 f"force_original_aspect_ratio=increase,"
-                f"crop={{width}}:{{height}},"
+                f"crop={width}:{height},"
                 f"boxblur=20:5[bg{i}];"
-                f"[f{i}]scale={{width}}:{{height}}:"
+                f"[f{i}]scale={width}:{height}:"
                 f"force_original_aspect_ratio=decrease[fg{i}];"
                 f"[bg{i}][fg{i}]overlay=(W-w)/2:(H-h)/2,"
                 f"setsar=1,"
@@ -93,9 +93,9 @@ def render_video(
             )
         else:
             chain = (
-                f"[{i}:v]scale={{width}}:{{height}}:"
+                f"[{i}:v]scale={width}:{height}:"
                 f"force_original_aspect_ratio=increase,"
-                f"crop={{width}}:{{height}},"
+                f"crop={width}:{height},"
                 f"setsar=1,"
                 f"{trim},setpts=PTS-STARTPTS[v{i}]"
             )
