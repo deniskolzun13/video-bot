@@ -123,3 +123,54 @@ class TestFFmpegSmoke:
         check = validate_output(out, target_w=1080, target_h=1080)
         assert check["ok"], f"валидация не пройдена: {check['reasons']}"
         assert check["resolution"] == (1080, 1080)
+
+    def test_unified_timeline_render(self, tmp_path):
+        """Единый рендер: несколько сегментов (news/transition/outro) с аудио
+        и субтитрами -> ОДИН mp4 + ffprobe-валидация."""
+        from news.models import ITEM_NEWS, ITEM_OUTRO, ITEM_TRANSITION, TimelineItem, UnifiedTimeline
+        from video_render_unified import render_unified_timeline
+
+        # сегменты: NEWS 1 (2с) + transition (1с) + NEWS 2 (2с) + outro (1с)
+        clips = [
+            (str(_make_test_clip(tmp_path / "c1.mp4", 2.0, color="red")), 2.0, 0.0),
+            (str(_make_test_clip(tmp_path / "c2.mp4", 1.0, color="blue")), 1.0, 0.0),
+            (str(_make_test_clip(tmp_path / "c3.mp4", 2.0, color="green")), 2.0, 0.0),
+            (str(_make_test_clip(tmp_path / "c4.mp4", 1.0, color="purple")), 1.0, 0.0),
+        ]
+        audios = [_make_audio(tmp_path / f"a{i}.wav", 2.0) for i in range(4)]
+        audios[1] = _make_audio(tmp_path / "a1.wav", 1.0)
+        audios[3] = _make_audio(tmp_path / "a3.wav", 1.0)
+
+        timeline = UnifiedTimeline(items=[
+            TimelineItem(id="n1", type=ITEM_NEWS, start=0.0, end=2.0, duration=2.0,
+                         news_id=1, text="Первая новость про технологии.",
+                         audio_path=str(audios[0]), video_paths=[clips[0]]),
+            TimelineItem(id="t1", type=ITEM_TRANSITION, start=2.0, end=3.0, duration=1.0,
+                         news_id=1, text="А теперь к следующей.",
+                         audio_path=str(audios[1]), video_paths=[clips[1]]),
+            TimelineItem(id="n2", type=ITEM_NEWS, start=3.0, end=5.0, duration=2.0,
+                         news_id=2, text="Вторая новость про смартфоны.",
+                         audio_path=str(audios[2]), video_paths=[clips[2]]),
+            TimelineItem(id="o1", type=ITEM_OUTRO, start=5.0, end=6.0, duration=1.0,
+                         news_id=None, text="На сегодня всё.",
+                         audio_path=str(audios[3]), video_paths=[clips[3]]),
+        ])
+        ass = tmp_path / "subs.ass"
+        out = tmp_path / "unified_out.mp4"
+
+        render_unified_timeline(
+            timeline, ass, out,
+            news_titles={1: "Новость 1", 2: "Новость 2"},
+            width=1080, height=1920,
+        )
+
+        assert out.exists(), "mp4 не создан"
+        assert out.stat().st_size > 0
+        assert ass.exists(), "ASS субтитры не созданы"
+        check = validate_output(out, target_w=1080, target_h=1920)
+        assert check["ok"], f"валидация не пройдена: {check['reasons']}"
+        assert check["resolution"] == (1080, 1920)
+        # 6с сегментов минус 3 crossfade по TRANSITION_DURATION (0.5) = ~4.5с
+        import config
+
+        assert abs(check["duration"] - (6.0 - 3 * config.TRANSITION_DURATION)) < 0.8

@@ -48,7 +48,7 @@ CACHE_TTL_DAYS = int(getenv("CACHE_TTL_DAYS", "7"))
 MAX_CACHE_SIZE_MB = int(getenv("MAX_CACHE_SIZE_MB", "500"))
 
 # Параллельный рендер
-RENDER_CONCURRENCY = int(getenv("RENDER_CONCURRENCY", "2"))
+RENDER_CONCURRENCY = int(getenv("RENDER_CONCURRENCY", "1"))
 # Таймаут одного ffmpeg-рендера (сек)
 RENDER_TIMEOUT_SECONDS = float(getenv("RENDER_TIMEOUT_SECONDS", "600"))
 
@@ -67,9 +67,22 @@ TTS_CROSSFADE = float(getenv("TTS_CROSSFADE", "0.05"))
 # Отключить кроссфейд (склейка внахлёст) — для отладки/контроля
 TTS_DISABLE_CROSSFADE = getenv("TTS_DISABLE_CROSSFADE", "").lower() in ("1", "true", "yes")
 
+# --- Режим работы AI ---
+# local — всё локально: Ollama (LLM), локальный TTS/ASR/FFmpeg, БЕЗ облачного fallback.
+# cloud — облачные провайдеры (Yandex SpeechKit, OpenAI-совместимые LLM).
+AI_MODE = getenv("AI_MODE", "local").lower()
+
 # --- LLM (AI provider abstraction) ---
-# LLM_PROVIDER: openai (OpenAI-совместимый API: OpenAI, OpenRouter, YandexGPT, ...)
-LLM_PROVIDER = getenv("LLM_PROVIDER", "openai")
+# LLM_PROVIDER: local (Ollama) или openai (OpenAI-совместимый API).
+# В AI_MODE=local используется LLM_PROVIDER=local (Ollama).
+LLM_PROVIDER = getenv("LLM_PROVIDER", "local" if AI_MODE == "local" else "openai")
+
+# Локальная LLM через Ollama
+LOCAL_LLM_PROVIDER = getenv("LOCAL_LLM_PROVIDER", "ollama")
+OLLAMA_BASE_URL = getenv("OLLAMA_BASE_URL", "http://127.0.0.1:11434")
+# Модель НЕ хардкодится — читается из env (например qwen3:8b)
+OLLAMA_MODEL = getenv("OLLAMA_MODEL", "qwen3:8b")
+
 LLM_API_KEY = getenv("LLM_API_KEY")
 LLM_BASE_URL = getenv("LLM_BASE_URL", "https://api.openai.com/v1")
 LLM_MODEL = getenv("LLM_MODEL", "gpt-4o-mini")
@@ -81,6 +94,30 @@ LLM_AUTH_HEADER = getenv("LLM_AUTH_HEADER", "Authorization")
 # Таймаут и ретраи для LLM-запросов
 LLM_TIMEOUT = float(getenv("LLM_TIMEOUT", "60"))
 LLM_RETRIES = int(getenv("LLM_RETRIES", "2"))
+
+# --- Локальный TTS / ASR ---
+# LOCAL_TTS_ENGINE: espeak-ng (встроенный), piper (если установлен).
+# Пусто — используем TTS по умолчанию для режима (в local — espeak-ng).
+LOCAL_TTS_ENGINE = getenv("LOCAL_TTS_ENGINE", "espeak-ng")
+# LOCAL_ASR_ENGINE: whisper (локальный whisper-timestamped)
+LOCAL_ASR_ENGINE = getenv("LOCAL_ASR_ENGINE", "whisper")
+
+# --- News batch ---
+MAX_NEWS_PER_BATCH = int(getenv("MAX_NEWS_PER_BATCH", "20"))
+MAX_NEWS_TEXT_LENGTH = int(getenv("MAX_NEWS_TEXT_LENGTH", "10000"))
+MAX_TOTAL_BATCH_LENGTH = int(getenv("MAX_TOTAL_BATCH_LENGTH", "100000"))
+INTRO_ENABLED = getenv("INTRO_ENABLED", "true").lower() in ("1", "true", "yes")
+OUTRO_ENABLED = getenv("OUTRO_ENABLED", "true").lower() in ("1", "true", "yes")
+TRANSITIONS_ENABLED = getenv("TRANSITIONS_ENABLED", "true").lower() in ("1", "true", "yes")
+# Тип переходов между сегментами: fade | crossfade
+TRANSITION_TYPE = getenv("TRANSITION_TYPE", "crossfade").lower()
+TRANSITION_DURATION = float(getenv("TRANSITION_DURATION", "0.5"))
+# Title card перед каждой новостью
+NEWS_TITLE_ENABLED = getenv("NEWS_TITLE_ENABLED", "true").lower() in ("1", "true", "yes")
+NEWS_TITLE_DURATION = float(getenv("NEWS_TITLE_DURATION", "1.0"))
+
+# Локальная библиотека видео (VIDEO_SOURCE=local / auto): data/media/<категория>/*.mp4
+LOCAL_MEDIA_DIR = getenv("LOCAL_MEDIA_DIR", "data/media")
 
 # --- Data storage ---
 DATA_DIR = getenv("DATA_DIR", "data")
@@ -161,7 +198,8 @@ JOB_DIR = getenv("JOB_DIR", f"{DATA_DIR}/jobs")
 
 # Сколько заданий (генераций) может выполняться параллельно.
 # Отдельно от рендера: рендер (ffmpeg) лимитируется RENDER_CONCURRENCY.
-JOB_CONCURRENCY = int(getenv("JOB_CONCURRENCY", "2"))
+# Для локального AI (16 GB RAM, RTX 3050) — по умолчанию 1 (безопасно).
+JOB_CONCURRENCY = int(getenv("JOB_CONCURRENCY", "1"))
 
 
 def validate_config() -> list[str]:
@@ -177,8 +215,22 @@ def validate_config() -> list[str]:
     if not TELEGRAM_BOT_TOKEN:
         errors.append("TELEGRAM_BOT_TOKEN не задан (обязателен)")
 
+    if AI_MODE == "local":
+        # Локальный режим: никакого облачного fallback. Требуем Ollama-настройки.
+        if LLM_PROVIDER != "local" or LOCAL_LLM_PROVIDER != "ollama":
+            errors.append(
+                "AI_MODE=local требует LLM_PROVIDER=local и LOCAL_LLM_PROVIDER=ollama"
+            )
+        if not OLLAMA_BASE_URL:
+            errors.append("OLLAMA_BASE_URL не задан")
+        if not OLLAMA_MODEL:
+            errors.append("OLLAMA_MODEL не задан (например qwen3:8b)")
+        if LOCAL_TTS_ENGINE not in ("espeak-ng", "piper"):
+            errors.append(f"Неизвестный LOCAL_TTS_ENGINE: {LOCAL_TTS_ENGINE}")
+        return errors
+
     source = VIDEO_SOURCE
-    if source in ("pexels", "auto") and not PEXELS_API_KEY:
+    if source in ("pexels", "online", "auto") and not PEXELS_API_KEY:
         errors.append("PEXELS_API_KEY не задан — стоковые видео работать не будут")
 
     if source == "steam" and not (YANDEX_API_KEY or YANDEX_IAM_TOKEN):

@@ -10,11 +10,15 @@ import config
 
 _DB_LOCK = threading.Lock()
 
-# Допустимые статусы job (см. ТЗ v2.0.1: cancellation / job states)
+# Допустимые статусы job (см. ТЗ v2.0.1: cancellation / job states
+# и раздел 40: queued, collecting_news, analyzing, editing, deduplicating,
+# ordering, planning, tts, alignment, video_search, timeline, rendering,
+# validating, completed, failed, cancelled).
 JOB_STATUSES = (
-    "queued", "analyzing", "scripting", "planning", "tts", "alignment",
-    "searching", "downloading", "subtitles", "rendering", "validating",
-    "completed", "failed", "cancelled",
+    "queued", "collecting_news", "analyzing", "editing", "deduplicating",
+    "ordering", "planning", "tts", "alignment", "video_search", "timeline",
+    "scripting", "searching", "downloading", "subtitles", "rendering",
+    "validating", "completed", "failed", "cancelled",
 )
 
 _SCHEMA = """
@@ -49,10 +53,49 @@ CREATE TABLE IF NOT EXISTS videos (
     created_at REAL
 );
 
+CREATE TABLE IF NOT EXISTS news_batches (
+    id TEXT PRIMARY KEY,
+    user_id INTEGER,
+    news_count INTEGER DEFAULT 0,
+    status TEXT DEFAULT 'queued',
+    output_path TEXT,
+    created_at REAL,
+    completed_at REAL,
+    error TEXT
+);
+
+CREATE TABLE IF NOT EXISTS news_items (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    batch_id TEXT,
+    news_id INTEGER,
+    original_text TEXT,
+    edited_text TEXT,
+    title TEXT,
+    summary TEXT,
+    keywords TEXT,
+    importance REAL DEFAULT 0.5,
+    position INTEGER DEFAULT 0
+);
+
+CREATE TABLE IF NOT EXISTS timeline_items (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    batch_id TEXT,
+    item_type TEXT,
+    news_id INTEGER,
+    start REAL DEFAULT 0,
+    end REAL DEFAULT 0,
+    duration REAL DEFAULT 0,
+    text TEXT,
+    audio_path TEXT
+);
+
 CREATE INDEX IF NOT EXISTS idx_jobs_user_id ON jobs(user_id);
 CREATE INDEX IF NOT EXISTS idx_jobs_status ON jobs(status);
 CREATE INDEX IF NOT EXISTS idx_jobs_created_at ON jobs(created_at);
 CREATE INDEX IF NOT EXISTS idx_videos_job_id ON videos(job_id);
+CREATE INDEX IF NOT EXISTS idx_news_batches_user ON news_batches(user_id);
+CREATE INDEX IF NOT EXISTS idx_news_items_batch ON news_items(batch_id);
+CREATE INDEX IF NOT EXISTS idx_timeline_batch ON timeline_items(batch_id);
 """
 
 
@@ -199,6 +242,83 @@ class Database:
                 "WHERE j.user_id = ? AND j.status = 'completed' "
                 "ORDER BY j.created_at DESC LIMIT ?",
                 (user_id, limit),
+            ).fetchall()
+            return [dict(r) for r in rows]
+
+    # --- news_batches / news_items / timeline_items ---
+    def create_news_batch(self, batch_id: str, user_id: int, news_count: int) -> None:
+        with _DB_LOCK:
+            with self._conn:
+                self._conn.execute(
+                    "INSERT INTO news_batches (id, user_id, news_count, status, created_at) "
+                    "VALUES (?, ?, ?, 'queued', ?)",
+                    (batch_id, user_id, news_count, _now()),
+                )
+
+    def update_news_batch(self, batch_id: str, **fields: Any) -> None:
+        if not fields:
+            return
+        allowed = {"status", "output_path", "error", "completed_at", "news_count"}
+        fields = {k: v for k, v in fields.items() if k in allowed}
+        if not fields:
+            return
+        with _DB_LOCK:
+            sets = ", ".join(f"{k} = ?" for k in fields)
+            with self._conn:
+                self._conn.execute(
+                    f"UPDATE news_batches SET {sets} WHERE id = ?",
+                    (*fields.values(), batch_id),
+                )
+
+    def get_news_batch(self, batch_id: str) -> dict | None:
+        with _DB_LOCK:
+            row = self._conn.execute(
+                "SELECT * FROM news_batches WHERE id = ?", (batch_id,)
+            ).fetchone()
+            return dict(row) if row else None
+
+    def save_news_item(self, batch_id: str, item) -> None:
+        """Сохраняет NewsItem. keywords — JSON-строка."""
+        import json
+
+        with _DB_LOCK:
+            with self._conn:
+                self._conn.execute(
+                    "INSERT INTO news_items (batch_id, news_id, original_text, edited_text, "
+                    "title, summary, keywords, importance, position) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    (
+                        batch_id, item.id, item.original_text, item.edited_text,
+                        item.title, item.summary, json.dumps(item.keywords, ensure_ascii=False),
+                        item.importance, item.id,
+                    ),
+                )
+
+    def save_timeline_item(self, batch_id: str, item) -> None:
+        with _DB_LOCK:
+            with self._conn:
+                self._conn.execute(
+                    "INSERT INTO timeline_items (batch_id, item_type, news_id, start, end, "
+                    "duration, text, audio_path) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                    (
+                        batch_id, item.type, item.news_id, item.start, item.end,
+                        item.duration, item.text, item.audio_path,
+                    ),
+                )
+
+    def list_news_items(self, batch_id: str) -> list[dict]:
+        with _DB_LOCK:
+            rows = self._conn.execute(
+                "SELECT * FROM news_items WHERE batch_id = ? ORDER BY position",
+                (batch_id,),
+            ).fetchall()
+            return [dict(r) for r in rows]
+
+    def list_timeline_items(self, batch_id: str) -> list[dict]:
+        with _DB_LOCK:
+            rows = self._conn.execute(
+                "SELECT * FROM timeline_items WHERE batch_id = ? ORDER BY start",
+                (batch_id,),
             ).fetchall()
             return [dict(r) for r in rows]
 

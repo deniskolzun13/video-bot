@@ -11,12 +11,28 @@ def test_required_config():
 
 
 def test_new_v2_config():
-    assert config.LLM_PROVIDER.lower() == "openai"
+    assert config.LLM_PROVIDER.lower() in ("local", "openai")
+    assert config.AI_MODE == "local"
+    assert config.OLLAMA_MODEL
     assert config.SUBTITLE_STYLE in ("classic", "tiktok", "news", "gaming", "minimal")
     assert config.CACHE_ENABLED in (True, False)
     assert config.SCRIPT_GENERATION in ("on", "off", "auto")
     assert config.SCENES_MAX >= 3
     assert config.DATA_DIR
+
+
+def test_local_mode_config():
+    assert config.LLM_PROVIDER.lower() == "local"
+    assert config.LOCAL_LLM_PROVIDER == "ollama"
+    assert config.OLLAMA_BASE_URL
+    assert config.OLLAMA_MODEL == "qwen3:8b"
+    assert config.LOCAL_TTS_ENGINE in ("espeak-ng", "piper")
+    assert config.LOCAL_ASR_ENGINE == "whisper"
+    assert config.MAX_NEWS_PER_BATCH >= 1
+    assert config.MAX_NEWS_TEXT_LENGTH >= 1000
+    assert config.MAX_TOTAL_BATCH_LENGTH >= config.MAX_NEWS_TEXT_LENGTH
+    assert config.JOB_CONCURRENCY >= 1
+    assert config.RENDER_CONCURRENCY >= 1
 
 
 def test_tts_defaults():
