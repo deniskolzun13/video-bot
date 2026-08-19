@@ -50,7 +50,6 @@ def render_video(
     # Фоновая музыка
     music_input_idx = len(clips) + 1  # индекс входа для музыки
     if config.BACKGROUND_MUSIC:
-        from pathlib import Path
         music_path = Path(config.BG_MUSIC_PATH)
         if music_path.exists():
             cmd += ["-stream_loop", "-1", "-i", str(music_path)]
@@ -94,7 +93,6 @@ def render_video(
     audio_index = len(clips)  # индекс основной аудио (после всех видеоклипов)
 
     if config.BACKGROUND_MUSIC:
-        from pathlib import Path
         music_path = Path(config.BG_MUSIC_PATH)
         if music_path.exists():
             filters.append(
