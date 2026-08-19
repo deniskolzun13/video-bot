@@ -24,6 +24,8 @@ def create_llm_provider(cfg=config) -> LLMProvider:
             model=getattr(cfg, "LLM_MODEL", "gpt-4o-mini"),
             timeout=getattr(cfg, "LLM_TIMEOUT", 60),
             retries=getattr(cfg, "LLM_RETRIES", 2),
+            auth_type=getattr(cfg, "LLM_AUTH_TYPE", "auto"),
+            auth_header=getattr(cfg, "LLM_AUTH_HEADER", "Authorization"),
         )
     raise LLMError(
         f"Неизвестный LLM_PROVIDER: {provider_name}",

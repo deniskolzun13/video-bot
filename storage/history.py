@@ -12,7 +12,7 @@ def save_job_history(
     user_id: int,
     source_text: str,
     script: str = "",
-    status: str = "done",
+    status: str = "completed",
     output_path: str = "",
     duration: float = 0,
     error: str = "",
@@ -23,7 +23,7 @@ def save_job_history(
     try:
         if not db.get_job(job_id):
             db.create_job(job_id, user_id, source_text, script)
-        if status == "done":
+        if status == "completed":
             db.finish_job(job_id, status, output_path, error)
             if output_path:
                 db.add_video(job_id, output_path, duration)

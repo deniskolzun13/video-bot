@@ -154,3 +154,93 @@ class TestEscapeAss:
     def test_no_braces(self):
         assert _escape_ass("plain text") == "plain text"
         assert _escape_ass("") == ""
+
+
+class TestNormalizeWord:
+    def test_normalize_word(self):
+        from subtitles.alignment import normalize_word
+        assert normalize_word("Hello!") == "hello"
+        assert normalize_word("GPT-5.6") == "gpt56"
+        assert normalize_word("Open-AI") == "openai"
+        assert normalize_word("  HELLO  ") == "hello"
+
+    def test_normalize_unicode(self):
+        from subtitles.alignment import normalize_word
+        assert normalize_word("Café") == "café"
+        assert normalize_word("ёлка") == "ёлка"
+
+    def test_normalize_punctuation_only(self):
+        from subtitles.alignment import normalize_word
+        assert normalize_word("!!!") == ""
+        assert normalize_word("") == ""
+
+
+class TestFuzzyWordMatch:
+    def test_gpt_numbers(self):
+        from subtitles.alignment import fuzzy_word_match
+        assert fuzzy_word_match("gpt", "gpt-4") is True
+        assert fuzzy_word_match("gpt4", "gpt-4o") is True
+        assert fuzzy_word_match("gpt-5.6", "gpt56") is True
+
+    def test_hyphenated_words(self):
+        from subtitles.alignment import fuzzy_word_match
+        assert fuzzy_word_match("Open-AI", "openai") is True
+        assert fuzzy_word_match("OpenAI", "open-ai") is True
+
+    def test_not_match_different(self):
+        from subtitles.alignment import fuzzy_word_match
+        assert fuzzy_word_match("openai", "openaiv2") is False
+        assert fuzzy_word_match("gpt", "claude") is False
+        assert fuzzy_word_match("", "gpt") is False
+
+
+class TestWhisperOptional:
+    def test_alignment_returns_none_when_unavailable(self):
+        """whisper не обязателен: если модель грузится с ошибкой — fallback."""
+        import subtitles.alignment as al
+
+        def _raise(*args, **kwargs):
+            raise ImportError("no whisper")
+
+        old = al._get_whisper_model
+        try:
+            al._get_whisper_model = _raise
+            import asyncio
+            res = asyncio.run(al.build_timings_aligned(["test"], "/tmp/nonexistent.wav"))
+            assert res is None
+        finally:
+            al._get_whisper_model = old
+
+    def test_word_level_fallback_chain(self):
+        """word_level -> aligned -> proportional: цепочка в pipeline."""
+        import asyncio
+        from subtitles.alignment import build_timings_word_level
+
+        word_ts = [
+            {"word": "Привет", "start": 0.0, "end": 0.5},
+            {"word": "мир", "start": 0.5, "end": 1.0},
+        ]
+        timings = asyncio.run(build_timings_word_level(["Привет мир"], word_ts))
+        assert timings is not None
+        assert abs(timings[0][0] - 0.0) < 0.01
+        assert abs(timings[0][1] - 1.0) < 0.01
+
+    def test_word_level_asr_mismatch(self):
+        """ASR вернул расхождения (gpt vs gpt-4) — fuzzy спасает."""
+        import asyncio
+        from subtitles.alignment import build_timings_word_level
+
+        word_ts = [
+            {"word": "GPT-4", "start": 0.0, "end": 0.6},
+            {"word": "good", "start": 0.6, "end": 1.0},
+        ]
+        timings = asyncio.run(build_timings_word_level(["gpt good"], word_ts))
+        assert timings is not None
+        assert abs(timings[0][0] - 0.0) < 0.01
+
+    def test_word_level_fallback_proportional(self):
+        """Если ASR не дал слов — пропорциональный тайминг работает."""
+        from subtitles.alignment import build_timings
+        timings = build_timings(["a", "bbb"], 4.0)
+        assert abs(timings[0][1] - 1.0) < 0.01
+        assert abs(timings[1][1] - 4.0) < 0.01

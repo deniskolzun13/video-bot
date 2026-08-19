@@ -209,7 +209,7 @@ async def _synthesize_chunk(client: httpx.AsyncClient, chunk: str, dest: Path,
             except Exception:
                 err_detail = ""
             status_messages = {
-                401: "Неверный API-ключ Yandex SpeechKit. Проверьте TELEGRAM_BOT_TOKEN и YANDEX_API_KEY.",
+                401: "Неверный API-ключ Yandex SpeechKit. Проверьте YANDEX_API_KEY / YANDEX_IAM_TOKEN.",
                 403: "Доступ к SpeechKit запрещён. Проверьте тариф и доступность сервиса.",
             }
             user_msg = status_messages.get(response.status_code, "Ошибка синтеза речи. Попробуйте позже.")

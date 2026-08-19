@@ -5,12 +5,12 @@
 entities, keywords, visual_keywords). Если LLM не отвечает или возвращает мусор —
 работает детерминированный fallback (эвристика по частоте слов).
 """
-import json
 import logging
 import re
 from dataclasses import asdict, dataclass, field
 
 from ai import LLMError, LLMProvider, create_llm_provider
+from utils.json_utils import as_dict, as_str, as_str_list, extract_json
 from video_source import extract_keywords_heuristic, translate_keywords
 
 logger = logging.getLogger(__name__)
@@ -49,34 +49,15 @@ class Analysis:
 
 def _extract_json(content: str) -> dict | None:
     """Извлекает JSON из ответа LLM (устойчив к ```json``` обёртке и мусору)."""
-    if not content:
-        return None
-    # Убираем markdown-обёртку
-    cleaned = re.sub(r"^```(?:json)?\s*", "", content.strip(), flags=re.IGNORECASE)
-    cleaned = re.sub(r"\s*```$", "", cleaned)
-    # Ищем первую { ... последнюю } пару
-    start = cleaned.find("{")
-    end = cleaned.rfind("}")
-    if start < 0 or end <= start:
-        return None
-    try:
-        return json.loads(cleaned[start:end + 1])
-    except json.JSONDecodeError:
-        return None
+    return as_dict(extract_json(content))
 
 
 def _clean_str(value: str, limit: int = 200) -> str:
-    return (value or "").strip()[:limit]
+    return as_str(value, limit=limit)
 
 
 def _clean_list(value) -> list[str]:
-    if not isinstance(value, list):
-        return []
-    out = []
-    for item in value:
-        if isinstance(item, str) and item.strip():
-            out.append(item.strip())
-    return out
+    return as_str_list(value)
 
 
 def _validate(data: dict | None) -> Analysis | None:

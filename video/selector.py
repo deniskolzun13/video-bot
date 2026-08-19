@@ -1,10 +1,13 @@
 """Селектор видео: сцена -> визуальные ключи -> поиск -> ранжирование -> выбор.
 
-- получает сцену (text, visual, keywords)
-- делает несколько поисковых запросов
-- собирает кандидатов, ранжирует их (video/ranking.py)
-- выбирает лучший свободный (не в used_ids)
-- при отсутствии видео — fallback на Pexels->Pixabay->сгенерированный фон
+- получает сцену (visual, keywords, phrase_indexes)
+- делает несколько поисковых запросов (visual + keywords + fallback query)
+- собирает кандидатов, ранжирует их (video/ranking.py, прозрачные веса)
+- выбирает лучший свободный (не в used_ids); если свободных нет —
+  разрешает повтор лучшего из использованных (дубликат-защита с fallback)
+- при отсутствии видео вообще — fallback на сгенерированный фон
+
+Порядок провайдеров: Pexels -> Pixabay -> fallback query -> background.
 """
 import logging
 from pathlib import Path
@@ -23,6 +26,9 @@ from video_source import (
 
 logger = logging.getLogger(__name__)
 
+# Фоллбэк-запросы (обобщённые темы), когда visual не дал результатов
+FALLBACK_QUERIES = ["technology", "abstract", "office", "city", "nature"]
+
 
 class VideoSelector:
     """Выбирает клипы для сцен с защитой от повторов и ранжированием."""
@@ -36,12 +42,33 @@ class VideoSelector:
     def _dest(self, index: int) -> Path:
         return self.work_dir / f"clip_{index:03d}.mp4"
 
+    def _fallback_query(self, scene: Scene) -> str:
+        """Обобщённый запрос: последний keyword сцены, иначе — из глобального пула."""
+        if scene.keywords:
+            return scene.keywords[-1]
+        for q in FALLBACK_QUERIES:
+            if q not in (scene.visual or "").lower():
+                return q
+        return FALLBACK_QUERIES[0]
+
     async def _search_candidates(self, scene: Scene, per_page: int = 10) -> list[VideoClip]:
-        """Ищет кандидатов по visual и keywords сцена, объединяя провайдеров."""
-        queries = [scene.visual] if scene.visual else []
+        """Ищет кандидатов по visual/keywords/fallback-запросу у провайдеров.
+
+        Pexels -> Pixabay (если провайдер не Steam и задан ключ).
+        Возвращает уникальные клипы.
+        """
+        queries: list[str] = []
+        if scene.visual:
+            queries.append(scene.visual)
         queries += scene.keywords[:3]
-        if not queries:
-            queries = ["technology"]
+        queries.append(self._fallback_query(scene))
+        # Убираем дубли запросов, сохраняя порядок
+        seen_q: set[str] = set()
+        unique_queries: list[str] = []
+        for q in queries:
+            if q not in seen_q:
+                seen_q.add(q)
+                unique_queries.append(q)
 
         candidates: list[VideoClip] = []
         seen_ids: set[str] = set()
@@ -55,20 +82,25 @@ class VideoSelector:
                                query, provider.__class__.__name__, exc)
                 return []
 
-        for query in queries:
+        for query in unique_queries:
+            if len(candidates) >= config.MIN_CLIPS_PER_PHRASE:
+                break
             for cand in await _search(self.provider, query):
                 if cand.id not in seen_ids:
                     candidates.append(cand)
                     seen_ids.add(cand.id)
 
             # Fallback-провайдеры: Pexels->Pixabay, если провайдер не Steam
-            if not isinstance(self.provider, SteamProvider) and config.PIXABAY_API_KEY:
-                pix = PixabayProvider(config.PIXABAY_API_KEY)
-                for cand in await _search(pix, query):
-                    if cand.id not in seen_ids:
-                        candidates.append(cand)
-                        seen_ids.add(cand.id)
+            if len(candidates) < config.MIN_CLIPS_PER_PHRASE:
+                if not isinstance(self.provider, SteamProvider) and config.PIXABAY_API_KEY:
+                    pix = PixabayProvider(config.PIXABAY_API_KEY)
+                    for cand in await _search(pix, query):
+                        if cand.id not in seen_ids:
+                            candidates.append(cand)
+                            seen_ids.add(cand.id)
 
+        logger.debug("Сцена '%s': кандидатов %d (минимум %d)",
+                     scene.visual[:30], len(candidates), config.MIN_CLIPS_PER_PHRASE)
         return candidates
 
     async def select(self, scenes: list[Scene], timings: list[tuple[float, float]]) -> list[tuple[Path, float, float]]:
@@ -104,21 +136,40 @@ class VideoSelector:
         return result
 
     async def _pick_best(self, scene: Scene, min_duration: float) -> VideoClip | None:
-        """Ранжирует кандидатов и возвращает лучшего свободного."""
+        """Ранжирует кандидатов и возвращает лучшего.
+
+        Если все кандидаты уже использованы и есть хотя бы один свободный —
+        выбираем свободный. Если свободных нет — разрешаем повтор лучшего
+        (дубликат-защита с fallback), чтобы не упасть в фон.
+        """
         candidates = await self._search_candidates(scene)
         if not candidates:
             return None
+
         scored = [
             score_clip(c, scene.visual, scene.keywords, self.used_ids, min_duration)
             for c in candidates
         ]
         scored.sort(key=lambda s: s.score, reverse=True)
         best = scored[0]
-        if best.score < -1000:  # только дубликаты — значит все заняты
-            return None
-        logger.info("Лучший кандидат: id=%s score=%.1f (%s)",
-                    best.clip.id, best.score, ", ".join(best.reasons) or "—")
-        return best.clip
+
+        # Есть свободный кандидат — берём его
+        if best.score >= 0:
+            logger.info("Лучший кандидат: id=%s score=%.3f",
+                        best.clip.id, best.score)
+            return best.clip
+
+        # Все использованы: разрешаем повтор лучшего, если есть хоть какой-то
+        # кандидат (не пустой список) — иначе None (фон)
+        all_used = [s for s in scored if s.clip.id in self.used_ids]
+        if all_used:
+            allowed = [s for s in scored]
+            allowed.sort(key=lambda s: s.score, reverse=True)
+            top = allowed[0]
+            logger.info("Все клипы сцены использованы — повтор лучшего id=%s", top.clip.id)
+            return top.clip
+
+        return None
 
 
 def clip_score(clip: VideoClip, scene: Scene) -> float:

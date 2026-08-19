@@ -33,3 +33,18 @@ def test_subtitle_defaults():
     assert config.SUB_FONTSIZE > 0
     assert config.SUB_MARGIN_V >= 0
     assert config.SUB_OUTLINE_WIDTH > 0
+
+
+class TestFormat:
+    def test_vertical_default(self):
+        assert config.resolve_video_size(None) == (1080, 1920)
+        assert config.resolve_video_size("vertical") == (1080, 1920)
+
+    def test_square(self):
+        assert config.resolve_video_size("square") == (1080, 1080)
+
+    def test_landscape(self):
+        assert config.resolve_video_size("landscape") == (1920, 1080)
+
+    def test_unknown_falls_back_to_vertical(self):
+        assert config.resolve_video_size("bogus") == (1080, 1920)

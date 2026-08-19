@@ -8,11 +8,11 @@
 не переписываем (контролируется config.SCRIPT_GENERATION=on/off).
 """
 import logging
-import re
 from dataclasses import dataclass
 
 from ai import LLMError, LLMProvider, create_llm_provider
 from script.analyzer import Analysis
+from utils.json_utils import as_dict, as_str, extract_json
 
 logger = logging.getLogger(__name__)
 
@@ -61,12 +61,12 @@ class ScriptGenerator:
             logger.warning("Генерация сценария не удалась (%s)", exc)
             return None
 
-        data = self._extract_json(content)
+        data = as_dict(extract_json(content))
         if not data:
             return None
-        hook = (data.get("hook") or "").strip()
-        body = (data.get("body") or "").strip()
-        ending = (data.get("ending") or "").strip()
+        hook = as_str(data.get("hook"))
+        body = as_str(data.get("body"))
+        ending = as_str(data.get("ending"))
         parts = [p for p in (hook, body, ending) if p]
         if not parts:
             return None
@@ -75,20 +75,7 @@ class ScriptGenerator:
 
     @staticmethod
     def _extract_json(content: str) -> dict | None:
-        if not content:
-            return None
-        cleaned = re.sub(r"^```(?:json)?\s*", "", content.strip(), flags=re.IGNORECASE)
-        cleaned = re.sub(r"\s*```$", "", cleaned)
-        start = cleaned.find("{")
-        end = cleaned.rfind("}")
-        if start < 0 or end <= start:
-            return None
-        try:
-            import json
-            data = json.loads(cleaned[start:end + 1])
-            return data if isinstance(data, dict) else None
-        except Exception:
-            return None
+        return as_dict(extract_json(content))
 
 
 async def generate_script(

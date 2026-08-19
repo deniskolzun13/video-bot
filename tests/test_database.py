@@ -43,12 +43,35 @@ class TestDatabase:
     def test_create_and_update_job(self):
         self.db.create_job("JOB-1", 1, "text", "script")
         job = self.db.get_job("JOB-1")
-        assert job["status"] == "pending"
-        self.db.finish_job("JOB-1", "done", output_path="/tmp/x.mp4")
+        assert job["status"] == "queued"
+        self.db.finish_job("JOB-1", "completed", output_path="/tmp/x.mp4")
         job = self.db.get_job("JOB-1")
-        assert job["status"] == "done"
+        assert job["status"] == "completed"
         assert job["output_path"] == "/tmp/x.mp4"
         assert job["completed_at"] is not None
+
+    def test_set_stage(self):
+        from storage.database import JOB_STATUSES
+        self.db.create_job("JOB-1", 1, "text")
+        assert "analyzing" in JOB_STATUSES
+        assert "rendering" in JOB_STATUSES
+        assert "cancelled" in JOB_STATUSES
+        self.db.set_stage("JOB-1", "analyzing")
+        assert self.db.get_job("JOB-1")["status"] == "analyzing"
+        # Невалидный статус игнорируется
+        self.db.set_stage("JOB-1", "bogus")
+        assert self.db.get_job("JOB-1")["status"] == "analyzing"
+
+    def test_indexes_exist(self):
+        """PHASE 6: индексы для частых запросов существуют."""
+        rows = self.db._conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='index' AND name LIKE 'idx_%'"
+        ).fetchall()
+        names = {r["name"] for r in rows}
+        assert "idx_jobs_user_id" in names
+        assert "idx_jobs_status" in names
+        assert "idx_jobs_created_at" in names
+        assert "idx_videos_job_id" in names
 
     def test_list_jobs(self):
         self.db.create_job("JOB-1", 1, "text")
@@ -58,7 +81,7 @@ class TestDatabase:
 
     def test_add_video_and_history(self):
         self.db.create_job("JOB-1", 1, "text")
-        self.db.finish_job("JOB-1", "done", output_path="/tmp/x.mp4")
+        self.db.finish_job("JOB-1", "completed", output_path="/tmp/x.mp4")
         self.db.add_video("JOB-1", "/tmp/x.mp4", 30.0)
         history = self.db.list_history(1)
         assert len(history) == 1

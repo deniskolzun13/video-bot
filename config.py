@@ -49,6 +49,8 @@ MAX_CACHE_SIZE_MB = int(getenv("MAX_CACHE_SIZE_MB", "500"))
 
 # Параллельный рендер
 RENDER_CONCURRENCY = int(getenv("RENDER_CONCURRENCY", "2"))
+# Таймаут одного ffmpeg-рендера (сек)
+RENDER_TIMEOUT_SECONDS = float(getenv("RENDER_TIMEOUT_SECONDS", "600"))
 
 # Как приводить клипы к 9:16: blur — размытая подложка по бокам (видно весь кадр,
 # для трейлеров 16:9), crop — жёсткая обрезка по центру
@@ -71,6 +73,11 @@ LLM_PROVIDER = getenv("LLM_PROVIDER", "openai")
 LLM_API_KEY = getenv("LLM_API_KEY")
 LLM_BASE_URL = getenv("LLM_BASE_URL", "https://api.openai.com/v1")
 LLM_MODEL = getenv("LLM_MODEL", "gpt-4o-mini")
+# Способ авторизации: bearer (Authorization: Bearer <key>) или
+# api-key (Authorization: Api-Key <key>). По умолчанию auto — определяется
+# по префиксу ключа (sk-/t1. -> Bearer). Имя заголовка задаёт LLM_AUTH_HEADER.
+LLM_AUTH_TYPE = getenv("LLM_AUTH_TYPE", "auto").lower()
+LLM_AUTH_HEADER = getenv("LLM_AUTH_HEADER", "Authorization")
 # Таймаут и ретраи для LLM-запросов
 LLM_TIMEOUT = float(getenv("LLM_TIMEOUT", "60"))
 LLM_RETRIES = int(getenv("LLM_RETRIES", "2"))
@@ -81,6 +88,10 @@ DB_PATH = getenv("DB_PATH", f"{DATA_DIR}/video_bot.db")
 
 # --- Кэш (v2) ---
 CACHE_ENABLED = getenv("CACHE_ENABLED", "true").lower() in ("1", "true", "yes")
+
+# --- Тайминги / forced alignment ---
+# Максимальное время транскрипции whisper (сек). По истечении — proportional fallback.
+ALIGNMENT_TIMEOUT_SECONDS = float(getenv("ALIGNMENT_TIMEOUT_SECONDS", "30"))
 
 # --- Сценарий / сцены ---
 # SCRIPT_GENERATION: off — использовать текст как есть (по умолчанию, не переписываем
@@ -102,6 +113,21 @@ IMAGE_KEN_BURNS = float(getenv("IMAGE_KEN_BURNS", "4.0"))
 VIDEO_WIDTH = 1080
 VIDEO_HEIGHT = 1920
 FPS = 30
+
+
+def resolve_video_size(video_format: str | None) -> tuple[int, int]:
+    """Разрешает формат в (width, height).
+
+    vertical   -> 1080x1920 (9:16, Shorts/Reels)
+    square     -> 1080x1080 (1:1)
+    landscape  -> 1920x1080 (16:9)
+    """
+    fmt = (video_format or "vertical").lower()
+    if fmt == "square":
+        return 1080, 1080
+    if fmt == "landscape":
+        return 1920, 1080
+    return 1080, 1920  # vertical / default
 MAX_VIDEO_DURATION = float(getenv("MAX_VIDEO_DURATION", "75"))
 MAX_VIDEO_SYMBOLS = int(getenv("MAX_VIDEO_SYMBOLS", "3500"))
 MAX_PARTS = int(getenv("MAX_PARTS", "4"))
@@ -130,5 +156,41 @@ SUB_KARAOKE = getenv("SUB_KARAOKE", "").lower() in ("1", "true", "yes")
 
 WORK_DIR = getenv("WORK_DIR", "work")
 OUTPUT_DIR = getenv("OUTPUT_DIR", "output")
+# Директория для артефактов job: data/jobs/<JOB_ID>/
+JOB_DIR = getenv("JOB_DIR", f"{DATA_DIR}/jobs")
 
-BOT_CONCURRENCY = 1
+# Сколько заданий (генераций) может выполняться параллельно.
+# Отдельно от рендера: рендер (ffmpeg) лимитируется RENDER_CONCURRENCY.
+JOB_CONCURRENCY = int(getenv("JOB_CONCURRENCY", "2"))
+
+
+def validate_config() -> list[str]:
+    """Проверка критичной конфигурации при старте. Возвращает список ошибок.
+
+    Ошибки не прерывают импорт (бот может запуститься с дефолтами), но
+    должны быть показаны в логах. Ключи: TELEGRAM_BOT_TOKEN обязателен;
+    PEXELS_API_KEY обязателен (т.к. pexels — основной источник видео);
+    LLM_API_KEY важен, но бот работает и без него (fallback-эвристика).
+    """
+    errors: list[str] = []
+
+    if not TELEGRAM_BOT_TOKEN:
+        errors.append("TELEGRAM_BOT_TOKEN не задан (обязателен)")
+
+    source = VIDEO_SOURCE
+    if source in ("pexels", "auto") and not PEXELS_API_KEY:
+        errors.append("PEXELS_API_KEY не задан — стоковые видео работать не будут")
+
+    if source == "steam" and not (YANDEX_API_KEY or YANDEX_IAM_TOKEN):
+        errors.append("VIDEO_SOURCE=steam, но не заданы YANDEX_API_KEY/YANDEX_IAM_TOKEN")
+
+    if not (YANDEX_API_KEY or YANDEX_IAM_TOKEN):
+        errors.append("YANDEX_API_KEY / YANDEX_IAM_TOKEN не заданы — TTS и ASR не будут работать")
+
+    if CACHE_ENABLED and MAX_CACHE_SIZE_MB <= 0:
+        errors.append("MAX_CACHE_SIZE_MB должно быть > 0")
+
+    if JOB_CONCURRENCY < 1 or RENDER_CONCURRENCY < 1:
+        errors.append("JOB_CONCURRENCY и RENDER_CONCURRENCY должны быть >= 1")
+
+    return errors

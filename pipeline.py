@@ -86,7 +86,7 @@ async def _select_clips(
     if isinstance(provider, SteamProvider):
         return await _prepare_steam_clips(phrases, timings, provider, work_dir)
 
-    if scenes is not None and len(scenes) == len(phrases):
+    if scenes:
         selector = VideoSelector(provider, work_dir)
         return await selector.select(scenes, timings)
 
@@ -95,23 +95,12 @@ async def _select_clips(
 
 
 def _match_scenes_to_phrases(phrases: list[str], scenes) -> list:
-    """Сопоставляет сцены с фразами по тексту (fallback — по индексу/visual по кругу)."""
+    """Связывает сцены с фразами через map_scenes_to_phrases (по phrase_indexes)."""
+    from script.scene_planner import Scene, map_scenes_to_phrases
+
     if not scenes:
         return []
-    scene_by_text: dict[str, object] = {}
-    for s in scenes:
-        if getattr(s, "text", ""):
-            scene_by_text[s.text.strip().lower()] = s
-    result = []
-    used = set()
-    for i, phrase in enumerate(phrases):
-        key = phrase.strip().lower()
-        if key in scene_by_text and id(scene_by_text[key]) not in used:
-            result.append(scene_by_text[key])
-            used.add(id(scene_by_text[key]))
-        else:
-            result.append(scenes[i % len(scenes)])
-    return result
+    return map_scenes_to_phrases(phrases, [s if isinstance(s, Scene) else s for s in scenes])
 
 
 async def process_text(
@@ -122,6 +111,9 @@ async def process_text(
     job_id: str | None = None,
     user_id: int | None = None,
     settings: dict | None = None,
+    cancel_token=None,
+    render_semaphore=None,
+    job_dir: Path | None = None,
 ) -> list[Path]:
     """Полный пайплайн v2.0:
 
@@ -130,7 +122,12 @@ async def process_text(
 
     Возвращает список готовых mp4 (текст может быть разбит на несколько роликов).
     Никогда не поднимает исключения из-за отсутствия видео (fallback-фон).
+    cancel_token — опциональный CancellationToken (проверяется на каждом этапе;
+    ffmpeg-рендер при отмене завершается через terminate()/kill()).
     """
+    if cancel_token:
+        cancel_token.check()
+
     text = text.strip()
     if not text:
         raise ValueError("Пустой текст")
@@ -144,6 +141,8 @@ async def process_text(
 
     # 1. Анализ текста (topic, keywords, visual_keywords)
     await notify("🧠 Анализирую текст…")
+    if cancel_token:
+        cancel_token.check()
     llm = create_llm_provider()
     analysis = await analyze_text(text, llm)
     keywords = analysis.keywords or []
@@ -153,6 +152,8 @@ async def process_text(
     script_text = text
     if config.SCRIPT_GENERATION == "on":
         await notify("✍️ Создаю сценарий…")
+        if cancel_token:
+            cancel_token.check()
         script = await generate_script(text, analysis, llm)
         if script and script.full_text:
             script_text = script.full_text
@@ -166,9 +167,23 @@ async def process_text(
 
     try:
         for index, part in enumerate(parts):
+            if cancel_token:
+                cancel_token.check()
+
             # Уникальный task_id для изоляции параллельных задач
             part_task_id = task_id or uuid.uuid4().hex[:8]
-            wd = root / f"{part_task_id}_part_{index}"
+            if job_dir is not None:
+                wd = Path(job_dir) / f"part_{index}"
+                sub_dirs = {
+                    "tts": Path(job_dir) / "tts",
+                    "video": Path(job_dir) / "video",
+                    "subtitles": Path(job_dir) / "subtitles",
+                }
+                for d in sub_dirs.values():
+                    d.mkdir(parents=True, exist_ok=True)
+            else:
+                wd = root / f"{part_task_id}_part_{index}"
+                sub_dirs = {"tts": wd, "video": wd, "subtitles": wd}
             wd.mkdir(parents=True, exist_ok=True)
 
             # 3. Планирование сцен для этой части
@@ -178,8 +193,10 @@ async def process_text(
                 scenes = scene_plan.scenes
 
             await notify(f"🎙 Генерирую озвучку ({index + 1}/{len(parts)})…")
+            if cancel_token:
+                cancel_token.check()
             audio_path, duration = await synthesize(
-                part, wd,
+                part, sub_dirs["tts"],
                 voice=settings.get("voice") if settings else None,
                 speed=settings.get("speed") if settings else None,
             )
@@ -198,6 +215,8 @@ async def process_text(
 
             # 4. Тайминг: word-level (ASR) → whisper → пропорциональный
             await notify("⏱ Считаю тайминг…")
+            if cancel_token:
+                cancel_token.check()
             phrases = split_into_phrases(part)
             word_ts = await get_word_timestamps(audio_path, part)
             timings = await build_timings_word_level(phrases, word_ts) if word_ts else None
@@ -213,38 +232,57 @@ async def process_text(
 
             # 5. Видео-подбор (ранжированный, с fallback-фоном)
             await notify("🎞 Подбираю видео…")
-            if scenes and len(scenes) == len(phrases):
+            if cancel_token:
+                cancel_token.check()
+            if scenes:
                 scene_subset = _match_scenes_to_phrases(phrases, scenes)
             else:
                 scene_subset = None
 
             try:
-                clips = await _select_clips(phrases, timings, provider, wd, scene_subset)
+                clips = await _select_clips(phrases, timings, provider, sub_dirs["video"], scene_subset)
             except (VideoSourceError, ValueError) as exc:
                 if isinstance(provider, SteamProvider) and ((settings or {}).get("video_source") or config.VIDEO_SOURCE) == "auto":
                     logger.warning("Steam не дал видео (%s), fallback на Pexels", exc)
                     await notify("🔄 Steam пуст — переключаюсь на сток…")
                     provider = PexelsProvider(config.PEXELS_API_KEY)
-                    clips = await _select_clips(phrases, timings, provider, wd, scene_subset)
+                    clips = await _select_clips(phrases, timings, provider, sub_dirs["video"], scene_subset)
                 else:
                     raise
 
             # 6. Субтитры
             await notify("📝 Создаю субтитры…")
+            if cancel_token:
+                cancel_token.check()
             ass_path = generate_ass(
-                phrases, timings, wd / "subs.ass", keywords,
+                phrases, timings, sub_dirs["subtitles"] / "subs.ass", keywords,
                 word_timings_per_phrase if getattr(config, "SUB_KARAOKE", False) else None,
                 settings.get("subtitle_style") if settings else None,
             )
-            generate_srt(phrases, timings, wd / "subs.srt")
+            generate_srt(phrases, timings, sub_dirs["subtitles"] / "subs.srt")
 
             # 7. Рендер
             await notify("⚙️ Рендерю видео…")
+            if cancel_token:
+                cancel_token.check()
+            video_format = (settings or {}).get("format") or "vertical"
+            render_w, render_h = config.resolve_video_size(video_format)
             out_path = Path(config.OUTPUT_DIR) / f"video_{int(time.time())}_{index}.mp4"
-            await asyncio.to_thread(render_video, clips, audio_path, ass_path, out_path)
+            render_kwargs = dict(
+                width=render_w, height=render_h, cancel_token=cancel_token
+            )
+            if render_semaphore is not None:
+                async with render_semaphore:
+                    await asyncio.to_thread(
+                        render_video, clips, audio_path, ass_path, out_path, **render_kwargs
+                    )
+            else:
+                await asyncio.to_thread(
+                    render_video, clips, audio_path, ass_path, out_path, **render_kwargs
+                )
 
             # 8. Валидация выхода
-            check = validate_output(out_path)
+            check = validate_output(out_path, target_w=render_w, target_h=render_h)
             if not check["ok"]:
                 logger.warning("Валидация не пройдена: %s", check["reasons"])
                 raise ValueError(
@@ -255,6 +293,8 @@ async def process_text(
 
             videos.append(out_path)
             cleanup_dir(wd, keep=("subs.ass", "subs.srt", "tts_audio.mp3"))
+            if cancel_token:
+                cancel_token.check()
 
         # 9. История
         if saved_job_meta:
@@ -262,7 +302,7 @@ async def process_text(
                 save_job_history(
                     get_db(), saved_job_meta, user_id or 0, text,
                     script=script_text if script_text != text else "",
-                    status="done", output_path=str(v), duration=check.get("duration", 0),
+                    status="completed", output_path=str(v), duration=check.get("duration", 0),
                 )
 
         return videos

@@ -36,10 +36,23 @@ def render_video(
     audio_path: Path,
     ass_path: Path,
     out_path: Path,
+    cancel_token=None,
+    width: int | None = None,
+    height: int | None = None,
 ) -> Path:
-    """Склейка клипов (9:16, центр-кроп), озвучка, hardsub-субтитры через ffmpeg.
-    clips: [(путь, длительность_сегмента, сдвиг_внутри_видео)]."""
+    """Склейка клипов (вертикаль/квадрат/горизонталь, центр-кроп), озвучка,
+    hardsub-субтитры через ffmpeg.
+    clips: [(путь, длительность_сегмента, сдвиг_внутри_видео)].
+    cancel_token — опциональный CancellationToken: при отмене ffmpeg
+    завершается через terminate()/kill() и поднимается CancellationError.
+    width/height — целевое разрешение (по умолчанию из config)."""
+    from utils.cancellation import CancellationError
+
+    if cancel_token:
+        cancel_token.check()
     out_path = Path(out_path)
+    width = width or config.VIDEO_WIDTH
+    height = height or config.VIDEO_HEIGHT
     out_path.parent.mkdir(parents=True, exist_ok=True)
     total = sum(duration for _, duration, _ in clips)
 
@@ -68,11 +81,11 @@ def render_video(
         if config.VIDEO_PADDING == "blur":
             chain = (
                 f"[{i}:v]split[b{i}][f{i}];"
-                f"[b{i}]scale={config.VIDEO_WIDTH}:{config.VIDEO_HEIGHT}:"
+                f"[b{i}]scale={{width}}:{{height}}:"
                 f"force_original_aspect_ratio=increase,"
-                f"crop={config.VIDEO_WIDTH}:{config.VIDEO_HEIGHT},"
+                f"crop={{width}}:{{height}},"
                 f"boxblur=20:5[bg{i}];"
-                f"[f{i}]scale={config.VIDEO_WIDTH}:{config.VIDEO_HEIGHT}:"
+                f"[f{i}]scale={{width}}:{{height}}:"
                 f"force_original_aspect_ratio=decrease[fg{i}];"
                 f"[bg{i}][fg{i}]overlay=(W-w)/2:(H-h)/2,"
                 f"setsar=1,"
@@ -80,9 +93,9 @@ def render_video(
             )
         else:
             chain = (
-                f"[{i}:v]scale={config.VIDEO_WIDTH}:{config.VIDEO_HEIGHT}:"
+                f"[{i}:v]scale={{width}}:{{height}}:"
                 f"force_original_aspect_ratio=increase,"
-                f"crop={config.VIDEO_WIDTH}:{config.VIDEO_HEIGHT},"
+                f"crop={{width}}:{{height}},"
                 f"setsar=1,"
                 f"{trim},setpts=PTS-STARTPTS[v{i}]"
             )
@@ -124,9 +137,27 @@ def render_video(
         str(out_path),
     ]
     logger.info("ffmpeg: рендер %s (%.1f с, %d клипов)", out_path.name, total, len(clips))
-    result = subprocess.run(cmd, capture_output=True, text=True)
-    if result.returncode != 0:
-        raise ValueError(f"Ошибка ffmpeg при рендере: {result.stderr[-1000:]}")
+    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    try:
+        _, stderr = proc.communicate(timeout=config.RENDER_TIMEOUT_SECONDS)
+    except subprocess.TimeoutExpired:
+        proc.terminate()
+        try:
+            proc.kill()
+        except Exception:
+            pass
+        raise ValueError(
+            f"Рендер занял больше {config.RENDER_TIMEOUT_SECONDS:.0f} с — прервано"
+        )
+    if cancel_token and cancel_token.is_cancelled:
+        proc.terminate()
+        try:
+            proc.kill()
+        except Exception:
+            pass
+        raise CancellationError(cancel_token.reason)
+    if proc.returncode != 0:
+        raise ValueError(f"Ошибка ffmpeg при рендере: {(stderr or '')[-1000:]}")
     logger.info("Готово: %s", out_path)
     return out_path
 
@@ -148,11 +179,13 @@ def probe_video(path: Path) -> dict:
         return {}
 
 
-def validate_output(path: Path) -> dict:
+def validate_output(path: Path, target_w: int | None = None, target_h: int | None = None) -> dict:
     """Проверяет готовый MP4: существует, размер > 0, есть video+audio stream,
-    разрешение 1080x1920, длительность > 0, читается ffmpeg.
+    разрешение совпадает с целевым, длительность > 0, читается ffmpeg.
     Возвращает {ok: bool, reasons: [...], duration, resolution}.
     """
+    target_w = target_w or config.VIDEO_WIDTH
+    target_h = target_h or config.VIDEO_HEIGHT
     path = Path(path)
     reasons: list[str] = []
 
@@ -181,12 +214,11 @@ def validate_output(path: Path) -> dict:
     resolution = None
     if video_streams:
         vs = video_streams[0]
-        width = int(vs.get("width") or 0)
-        height = int(vs.get("height") or 0)
-        resolution = (width, height)
-        if width != config.VIDEO_WIDTH or height != config.VIDEO_HEIGHT:
-            reasons.append(f"разрешение {width}x{height} вместо {config.VIDEO_WIDTH}x{config.VIDEO_HEIGHT}")
-
+        fw = int(vs.get("width") or 0)
+        fh = int(vs.get("height") or 0)
+        resolution = (fw, fh)
+        if fw != target_w or fh != target_h:
+            reasons.append(f"разрешение {fw}x{fh} вместо {target_w}x{target_h}")
     return {
         "ok": not reasons,
         "reasons": reasons,

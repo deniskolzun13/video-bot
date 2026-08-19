@@ -15,21 +15,34 @@ import config
 from pipeline import process_text
 from storage import get_db, list_history
 from tts import TTSError
+from utils.cancellation import CancellationError, CancellationToken
 from utils.cleanup import remove_tree
 from video_source import VideoSourceError
+from utils.logging import job_context, setup_logging
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s %(levelname)s %(name)s: %(message)s",
-)
+setup_logging(logging.INFO)
 logger = logging.getLogger(__name__)
 
 bot = Bot(token=config.TELEGRAM_BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
 dp = Dispatcher()
-semaphore = asyncio.Semaphore(config.RENDER_CONCURRENCY)
+# Ограничение параллельных генераций (весь job) и параллельных ffmpeg-рендеров
+job_semaphore = asyncio.Semaphore(config.JOB_CONCURRENCY)
+render_semaphore = asyncio.Semaphore(config.RENDER_CONCURRENCY)
 
-# Словарь: user_id -> asyncio.Event для отмены задачи
-_cancel_events: dict[int, asyncio.Event] = {}
+# Словарь: user_id -> CancellationToken для отмены задачи
+_cancel_tokens: dict[int, CancellationToken] = {}
+
+# Маппинг этапа (префикс эмодзи в notify) -> статус job в БД
+STAGE_TO_JOB_STATUS = {
+    "🧠": "analyzing",
+    "✍️": "scripting",
+    "🎙": "tts",
+    "⏱": "alignment",
+    "🎞": "searching",
+    "📝": "subtitles",
+    "⚙️": "rendering",
+    "✅": "validating",
+}
 
 
 class AccessMiddleware(BaseMiddleware):
@@ -94,6 +107,7 @@ def settings_kb(user_id: int) -> InlineKeyboardMarkup:
         [InlineKeyboardButton(text=f"⚡ Скорость: {s['speed']}", callback_data="set_speed")],
         [InlineKeyboardButton(text=f"🎞 Источник видео: {s['video_source']}", callback_data="set_video_source")],
         [InlineKeyboardButton(text=f"💬 Стиль субтитров: {s['subtitle_style']}", callback_data="set_subtitle_style")],
+        [InlineKeyboardButton(text=f"📐 Формат: {s['format']}", callback_data="set_format")],
         [InlineKeyboardButton(text="⬅️ Назад", callback_data="menu")],
     ])
 
@@ -134,6 +148,15 @@ def subtitle_style_kb() -> InlineKeyboardMarkup:
         [InlineKeyboardButton(text="🎮 Gaming", callback_data="val_subtitle_style:gaming")],
         [InlineKeyboardButton(text="🎬 Classic", callback_data="val_subtitle_style:classic")],
         [InlineKeyboardButton(text="➖ Minimal", callback_data="val_subtitle_style:minimal")],
+        [InlineKeyboardButton(text="⬅️ Назад", callback_data="settings")],
+    ])
+
+
+def format_kb() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="📱 Вертикальный 9:16 (1080×1920)", callback_data="val_format:vertical")],
+        [InlineKeyboardButton(text="⬛ Квадрат 1:1 (1080×1080)", callback_data="val_format:square")],
+        [InlineKeyboardButton(text="🖥 Горизонтальный 16:9 (1920×1080)", callback_data="val_format:landscape")],
         [InlineKeyboardButton(text="⬅️ Назад", callback_data="settings")],
     ])
 
@@ -218,8 +241,13 @@ async def cb_history(call: CallbackQuery) -> None:
         created = item.get("created_at") or 0
         ts = time.strftime("%d.%m %H:%M", time.localtime(created))
         dur = item.get("duration") or 0
-        status = "✅" if item.get("status") == "done" else "❌"
-        lines.append(f"{i}. {status} {job} · {ts} · {dur:.0f}с")
+        status = "✅" if item.get("status") == "completed" else "❌"
+        line = f"{i}. {status} {job} · {ts} · {dur:.0f}с"
+        video_path = item.get("path")
+        if video_path:
+            if not Path(video_path).exists():
+                line += "\n   ⚠️ Файл больше недоступен"
+        lines.append(line)
     await call.message.edit_text("\n".join(lines), reply_markup=main_menu_kb())
 
 
@@ -239,6 +267,7 @@ async def cb_set(call: CallbackQuery) -> None:
         "speed": speed_kb,
         "video_source": video_source_kb,
         "subtitle_style": subtitle_style_kb,
+        "format": format_kb,
     }[action]()
     await call.message.edit_text("Выбери значение:", reply_markup=kb)
 
@@ -259,9 +288,9 @@ async def cb_val(call: CallbackQuery) -> None:
 @dp.callback_query(F.data == "cancel")
 async def cb_cancel(call: CallbackQuery) -> None:
     await call.answer("Отменяю генерацию…")
-    ev = _cancel_events.get(call.from_user.id)
-    if ev:
-        ev.set()
+    token = _cancel_tokens.get(call.from_user.id)
+    if token:
+        token.cancel()
     try:
         await call.message.edit_text("❌ Генерация отменена.", reply_markup=main_menu_kb())
     except Exception:
@@ -294,34 +323,53 @@ async def _handle(message: Message, text: str) -> None:
     db.upsert_user(message.from_user.id, message.from_user.username or "")
     job_id = db.next_job_id()
 
-    async with semaphore:
+    async with job_semaphore:
         status_msg = await message.answer("🔄 Ставлю задачу в очередь…", reply_markup=cancel_kb())
-        ev = asyncio.Event()
-        _cancel_events[message.from_user.id] = ev
+        token = CancellationToken()
+        _cancel_tokens[message.from_user.id] = token
 
         async def notify(status: str) -> None:
             logger.info("[%s] [user %s] %s", job_id, message.from_user.id, status)
-            if ev.is_set():
-                raise asyncio.CancelledError("Отменено пользователем")
+            token.check()
+            for prefix, db_status in STAGE_TO_JOB_STATUS.items():
+                if status.startswith(prefix):
+                    try:
+                        db.update_job(job_id, status=db_status)
+                    except Exception:
+                        pass
+                    break
             try:
                 await status_msg.edit_text(status, reply_markup=cancel_kb())
             except Exception:
                 pass
 
         task_id = uuid.uuid4().hex[:8]
-        work_dir = Path(config.WORK_DIR) / f"{message.from_user.id}_{task_id}"
+        # Структура артефактов job: data/jobs/<JOB_ID>/
+        #   input/   — исходные файлы
+        #   tts/     — озвучка
+        #   video/   — скачанные клипы
+        #   subtitles/ — subs.ass / subs.srt
+        #   output/  — готовые mp4
+        job_root = Path(config.JOB_DIR) / job_id
+        for sub in ("input", "tts", "video", "subtitles", "output"):
+            (job_root / sub).mkdir(parents=True, exist_ok=True)
+        work_dir = job_root / "input"
         db.create_job(job_id, message.from_user.id, text)
 
         try:
-            videos = await process_text(
-                text,
-                work_dir=work_dir,
-                notify=notify,
-                task_id=task_id,
-                job_id=job_id,
-                user_id=message.from_user.id,
-                settings=db.get_user_settings(message.from_user.id),
-            )
+            with job_context(job_id):
+                videos = await process_text(
+                    text,
+                    work_dir=work_dir,
+                    notify=notify,
+                    task_id=task_id,
+                    job_id=job_id,
+                    user_id=message.from_user.id,
+                    settings=db.get_user_settings(message.from_user.id),
+                    cancel_token=token,
+                    render_semaphore=render_semaphore,
+                    job_dir=job_root,
+                )
             for i, video in enumerate(videos, 1):
                 caption = "🎬 Готово! Видео к публикации." if len(videos) == 1 else f"🎬 Часть {i}/{len(videos)}"
                 try:
@@ -333,9 +381,9 @@ async def _handle(message: Message, text: str) -> None:
                 await status_msg.delete()
             except Exception:
                 pass
-            db.finish_job(job_id, "done", output_path=str(videos[0]) if videos else "")
+            db.finish_job(job_id, "completed", output_path=str(videos[0]) if videos else "")
 
-        except asyncio.CancelledError:
+        except (CancellationError, asyncio.CancelledError):
             db.finish_job(job_id, "cancelled", error="Отменено пользователем")
             try:
                 await status_msg.edit_text("❌ Генерация отменена.", reply_markup=main_menu_kb())
@@ -343,34 +391,36 @@ async def _handle(message: Message, text: str) -> None:
                 pass
         except TTSError as exc:
             logger.error("TTS ошибка [%s]: %s", job_id, exc.details or exc)
-            db.finish_job(job_id, "error", error=str(exc))
+            db.finish_job(job_id, "failed", error=str(exc))
             await status_msg.edit_text(f"🔊 Ошибка озвучки: {exc}\n\nПопробуйте сократить текст или повторите позже.",
                                        reply_markup=main_menu_kb())
         except VideoSourceError as exc:
             logger.error("Ошибка видео-источника [%s]: %s", job_id, exc.details or exc)
-            db.finish_job(job_id, "error", error=str(exc))
+            db.finish_job(job_id, "failed", error=str(exc))
             await status_msg.edit_text(f"🎬 Ошибка подбора видео: {exc}\n\nПопробуйте другую новость или повторите позже.",
                                        reply_markup=main_menu_kb())
         except ValueError as exc:
             logger.error("Ошибка пайплайна [%s]: %s", job_id, exc)
-            db.finish_job(job_id, "error", error=str(exc))
+            db.finish_job(job_id, "failed", error=str(exc))
             await status_msg.edit_text(f"❌ {exc}", reply_markup=main_menu_kb())
         except Exception as exc:
             logger.exception("Пайплайн упал [%s] для пользователя %s", job_id, message.from_user.id)
-            db.finish_job(job_id, "error", error=str(exc))
+            db.finish_job(job_id, "failed", error=str(exc))
             try:
                 await status_msg.edit_text("❌ Внутренняя ошибка. Попробуйте ещё раз. Если повторится — проверьте логи.",
                                            reply_markup=main_menu_kb())
             except Exception:
                 pass
         finally:
-            _cancel_events.pop(message.from_user.id, None)
+            _cancel_tokens.pop(message.from_user.id, None)
             remove_tree(work_dir)
 
 
 async def main() -> None:
     if not config.TELEGRAM_BOT_TOKEN:
         raise SystemExit("TELEGRAM_BOT_TOKEN не задан в .env")
+    for err in config.validate_config():
+        logger.warning("Конфигурация: %s", err)
     Path(config.WORK_DIR).mkdir(exist_ok=True)
     Path(config.OUTPUT_DIR).mkdir(exist_ok=True)
     Path(config.DATA_DIR).mkdir(exist_ok=True)

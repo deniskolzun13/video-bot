@@ -1,5 +1,5 @@
 """Unit tests для видео-ранжирования и защиты от дубликатов."""
-from video.ranking import score_clip
+from video.ranking import WEIGHTS, score_clip
 from video_source import VideoClip
 
 
@@ -36,6 +36,25 @@ class TestVideoRanking:
         long = score_clip(_clip("2", 1080, 1920, duration=30.0), "tech", min_duration=5.0)
         assert long.score > short.score
 
+    def test_score_in_0_1_range(self):
+        """Итоговый score свободного клипа — в [0, 1]."""
+        s = score_clip(_clip("1", 1080, 1920, duration=10.0, query="tech"), "tech", ["tech"])
+        assert 0.0 <= s.score <= 1.0
+
+    def test_weights_sum_to_one(self):
+        assert abs(sum(WEIGHTS.values()) - 1.0) < 0.001
+        assert WEIGHTS["relevance"] == 0.40
+        assert WEIGHTS["orientation"] == 0.20
+        assert WEIGHTS["resolution"] == 0.15
+        assert WEIGHTS["duration"] == 0.10
+        assert WEIGHTS["keyword"] == 0.15
+
+    def test_relevance_weight_dominant(self):
+        """Полное совпадение запроса даёт больше, чем только ориентация."""
+        exact = score_clip(_clip("1", 640, 1136, duration=5.0, query="ai research"), "ai research", [])
+        generic = score_clip(_clip("2", 1080, 1920, duration=30.0, query="abstract"), "ai research", [])
+        assert exact.score > generic.score
+
 
 class TestDeduplication:
     def test_selector_uses_used_ids(self):
@@ -49,3 +68,26 @@ class TestDeduplication:
         used = {"1"}
         fresh = score_clip(_clip("2", 1080, 1920), "test", used_ids=used)
         assert fresh.score > -1000
+
+
+class TestDuplicateClips:
+    """ТЗ: тест_дубликат A,A,B -> A,B (не повторяем), A,A,A — не падает."""
+
+    def test_a_a_b_picks_fresh(self):
+        """Если для двух сцен доступны A,A,B — вторая сцена должна взять B."""
+        used: set[str] = set()
+        used.add("A")
+        a2 = score_clip(_clip("A", 1080, 1920), "test", used_ids=used)
+        b = score_clip(_clip("B", 1080, 1920), "test", used_ids=used)
+        assert a2.score <= -1000  # A уже использован
+        assert b.score > a2.score
+        # выбираем лучший
+        assert b.score > 0
+
+    def test_a_a_a_does_not_crash(self):
+        """Только дубликаты — функция не падает, возвращает -1000."""
+        used = {"A"}
+        s = score_clip(_clip("A", 1080, 1920), "test", used_ids=used)
+        assert s.score <= -1000
+        # и селектор сможет вернуть лучший из использованных
+        assert s.score == min(s.score, -1000)

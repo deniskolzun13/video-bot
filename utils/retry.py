@@ -9,7 +9,7 @@ from typing import Awaitable, Callable, TypeVar
 
 logger = logging.getLogger(__name__)
 
-RETRYABLE_STATUS = {429, 500, 502, 503, 504}
+RETRYABLE_STATUS = {408, 429, 500, 502, 503, 504}
 
 T = TypeVar("T")
 

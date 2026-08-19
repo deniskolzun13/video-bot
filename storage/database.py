@@ -10,6 +10,13 @@ import config
 
 _DB_LOCK = threading.Lock()
 
+# Допустимые статусы job (см. ТЗ v2.0.1: cancellation / job states)
+JOB_STATUSES = (
+    "queued", "analyzing", "scripting", "planning", "tts", "alignment",
+    "searching", "downloading", "subtitles", "rendering", "validating",
+    "completed", "failed", "cancelled",
+)
+
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS users (
     user_id INTEGER PRIMARY KEY,
@@ -18,14 +25,14 @@ CREATE TABLE IF NOT EXISTS users (
     speed REAL DEFAULT 1.0,
     video_source TEXT DEFAULT 'auto',
     subtitle_style TEXT DEFAULT 'tiktok',
-    format TEXT DEFAULT 'mp4',
+    format TEXT DEFAULT 'vertical',
     created_at REAL
 );
 
 CREATE TABLE IF NOT EXISTS jobs (
     id TEXT PRIMARY KEY,
     user_id INTEGER,
-    status TEXT DEFAULT 'pending',
+    status TEXT DEFAULT 'queued',
     source_text TEXT,
     script TEXT,
     output_path TEXT,
@@ -41,6 +48,11 @@ CREATE TABLE IF NOT EXISTS videos (
     duration REAL DEFAULT 0,
     created_at REAL
 );
+
+CREATE INDEX IF NOT EXISTS idx_jobs_user_id ON jobs(user_id);
+CREATE INDEX IF NOT EXISTS idx_jobs_status ON jobs(status);
+CREATE INDEX IF NOT EXISTS idx_jobs_created_at ON jobs(created_at);
+CREATE INDEX IF NOT EXISTS idx_videos_job_id ON videos(job_id);
 """
 
 
@@ -84,7 +96,7 @@ class Database:
                          fields.get("voice", "zahar"), fields.get("speed", 1.0),
                          fields.get("video_source", "auto"),
                          fields.get("subtitle_style", "tiktok"),
-                         fields.get("format", "mp4")),
+                         fields.get("format", "vertical")),
                     )
                 else:
                     cols = {k: v for k, v in fields.items() if k in (
@@ -108,7 +120,7 @@ class Database:
             "speed": float(user["speed"]) if user else float(config.TTS_SPEED),
             "video_source": user["video_source"] if user else config.VIDEO_SOURCE,
             "subtitle_style": user["subtitle_style"] if user else config.SUBTITLE_STYLE,
-            "format": user["format"] if user else "mp4",
+            "format": user["format"] if user else "vertical",
         }
 
     # --- jobs ---
@@ -134,9 +146,15 @@ class Database:
             with self._conn:
                 self._conn.execute(
                     "INSERT INTO jobs (id, user_id, status, source_text, script, created_at) "
-                    "VALUES (?, ?, 'pending', ?, ?, ?)",
+                    "VALUES (?, ?, 'queued', ?, ?, ?)",
                     (job_id, user_id, source_text, script, _now()),
                 )
+
+    def set_stage(self, job_id: str, status: str) -> None:
+        """Обновляет статус job. Игнорирует неизвестные статусы."""
+        if status not in JOB_STATUSES:
+            return
+        self.update_job(job_id, status=status)
 
     def update_job(self, job_id: str, **fields: Any) -> None:
         if not fields:
@@ -178,7 +196,7 @@ class Database:
             rows = self._conn.execute(
                 "SELECT j.id AS job_id, j.status, j.created_at, v.path, v.duration "
                 "FROM jobs j LEFT JOIN videos v ON v.job_id = j.id "
-                "WHERE j.user_id = ? AND j.status = 'done' "
+                "WHERE j.user_id = ? AND j.status = 'completed' "
                 "ORDER BY j.created_at DESC LIMIT ?",
                 (user_id, limit),
             ).fetchall()
