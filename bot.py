@@ -17,6 +17,7 @@ from storage import get_db, list_history
 from tts import TTSError
 from utils.cancellation import CancellationError, CancellationToken
 from utils.cleanup import remove_tree
+from utils.errors import ConfigurationError, InternalError, ProviderError, UserError, ValidationError
 from video_source import VideoSourceError
 from utils.logging import job_context, setup_logging
 
@@ -389,6 +390,20 @@ async def _handle(message: Message, text: str) -> None:
                 await status_msg.edit_text("❌ Генерация отменена.", reply_markup=main_menu_kb())
             except Exception:
                 pass
+        except UserError as exc:
+            logger.warning("Ошибка пользователя [%s]: %s", job_id, exc)
+            db.finish_job(job_id, "failed", error=str(exc))
+            await status_msg.edit_text(f"❌ {exc}", reply_markup=main_menu_kb())
+        except ConfigurationError as exc:
+            logger.error("Ошибка конфигурации [%s]: %s", job_id, exc)
+            db.finish_job(job_id, "failed", error=str(exc))
+            await status_msg.edit_text(f"⚙️ Ошибка конфигурации: {exc}\n\nПроверьте .env и перезапустите бота.",
+                                       reply_markup=main_menu_kb())
+        except ValidationError as exc:
+            logger.warning("Ошибка валидации [%s]: %s", job_id, exc)
+            db.finish_job(job_id, "failed", error=str(exc))
+            await status_msg.edit_text(f"🛠 Результат не прошёл проверку: {exc}\n\nПопробуйте ещё раз.",
+                                       reply_markup=main_menu_kb())
         except TTSError as exc:
             logger.error("TTS ошибка [%s]: %s", job_id, exc.details or exc)
             db.finish_job(job_id, "failed", error=str(exc))
@@ -399,10 +414,20 @@ async def _handle(message: Message, text: str) -> None:
             db.finish_job(job_id, "failed", error=str(exc))
             await status_msg.edit_text(f"🎬 Ошибка подбора видео: {exc}\n\nПопробуйте другую новость или повторите позже.",
                                        reply_markup=main_menu_kb())
+        except ProviderError as exc:
+            logger.error("Ошибка провайдера [%s]: %s", job_id, exc.details or exc)
+            db.finish_job(job_id, "failed", error=str(exc))
+            await status_msg.edit_text(f"🌐 Ошибка внешнего сервиса: {exc}\n\nПопробуйте повторить позже.",
+                                       reply_markup=main_menu_kb())
         except ValueError as exc:
             logger.error("Ошибка пайплайна [%s]: %s", job_id, exc)
             db.finish_job(job_id, "failed", error=str(exc))
             await status_msg.edit_text(f"❌ {exc}", reply_markup=main_menu_kb())
+        except InternalError as exc:
+            logger.error("Внутренняя ошибка [%s]: %s", job_id, exc.details or exc)
+            db.finish_job(job_id, "failed", error=str(exc))
+            await status_msg.edit_text("❌ Внутренняя ошибка. Попробуйте ещё раз. Если повторится — проверьте логи.",
+                                       reply_markup=main_menu_kb())
         except Exception as exc:
             logger.exception("Пайплайн упал [%s] для пользователя %s", job_id, message.from_user.id)
             db.finish_job(job_id, "failed", error=str(exc))

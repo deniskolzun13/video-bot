@@ -9,6 +9,7 @@ import httpx
 
 import config
 from subtitles import split_sentences
+from utils.errors import ConfigurationError, ProviderError
 from utils.retry import RetryableError, is_retryable_status, retry_async
 
 logger = logging.getLogger(__name__)
@@ -19,17 +20,15 @@ ASR_V3_URL = "https://stt.api.cloud.yandex.net/stt/v3/recognizeFileAsync"
 ASR_V3_RESULT_URL = "https://stt.api.cloud.yandex.net/stt/v3/getRecognition"
 
 
-class TTSError(Exception):
-    """Ошибка синтеза речи — сообщение для пользователя."""
-    def __init__(self, message: str, details: str = ""):
-        super().__init__(message)
-        self.details = details
+class TTSError(ProviderError):
+    """Ошибка синтеза речи — сообщение для пользователя (наследует ProviderError)."""
 
 
-class APIError(Exception):
+class APIError(ProviderError):
     """Общая ошибка внешнего API."""
+
     def __init__(self, service: str, message: str, status_code: int = 0):
-        super().__init__(message)
+        super().__init__(message, details=f"{service} status {status_code}")
         self.service = service
         self.status_code = status_code
 
@@ -39,7 +38,7 @@ def _auth_headers() -> dict[str, str]:
         return {"Authorization": f"Api-Key {config.YANDEX_API_KEY}"}
     if config.YANDEX_IAM_TOKEN:
         return {"Authorization": f"Bearer {config.YANDEX_IAM_TOKEN}"}
-    raise TTSError("Не настроен Yandex SpeechKit: отсутствует API-ключ или IAM-токен")
+    raise ConfigurationError("Не настроен Yandex SpeechKit: отсутствует API-ключ или IAM-токен")
 
 
 async def get_word_timestamps(audio_path: Path, text: str = "") -> list[dict] | None:

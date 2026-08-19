@@ -13,17 +13,14 @@ from deep_translator import GoogleTranslator
 import config
 from ai import create_llm_provider
 from tts import probe_duration
-
 from prompts import PROMPT_EXTRACT_KEYWORDS, PROMPT_EXTRACT_GAME_NAME
+from utils.errors import ProviderError
 
 logger = logging.getLogger(__name__)
 
 
-class VideoSourceError(Exception):
-    """Ошибка поиска/скачивания видео — сообщение для пользователя."""
-    def __init__(self, message: str, details: str = ""):
-        super().__init__(message)
-        self.details = details
+class VideoSourceError(ProviderError):
+    """Ошибка поиска/скачивания видео — сообщение для пользователя (наследует ProviderError)."""
 
 STOPWORDS = set(
     """и в во не что он на я с со как а то все она так его но да ты к у же вы за бы по

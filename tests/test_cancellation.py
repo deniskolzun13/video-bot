@@ -72,8 +72,10 @@ class TestPipelineCancellation:
         async def notify(s):
             pass
 
-        # Пустой текст -> ValueError, а не CancellationError
-        with pytest.raises(ValueError):
+        # Пустой текст -> UserError (наследник AppError), а не CancellationError
+        from utils.errors import UserError
+
+        with pytest.raises(UserError):
             asyncio.run(process_text("   ", tmp_path, notify))
 
     def test_cancel_during_pipeline_raises(self):

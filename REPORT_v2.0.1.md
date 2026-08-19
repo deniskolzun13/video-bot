@@ -37,7 +37,10 @@
 - `JOB_CONCURRENCY` и `RENDER_CONCURRENCY` раздельно; `job_semaphore`/`render_semaphore` в боте.
 - Формат видео (vertical/square/landscape) в настройках бота; `resolve_video_size`; рендер и валидация по целевому разрешению.
 - Артефакты заданий в `data/jobs/<JOB_ID>/{input,tts,video,subtitles,output}`.
-- `validate_config` при старте; иерархия ошибок в `utils/errors.py`; логирование с `job_id` (contextvar).
+- `validate_config` при старте; иерархия ошибок в `utils/errors.py` (`UserError`,
+  `ProviderError`, `ConfigurationError`, `ValidationError`, `InternalError`;
+  TTS/видео/LLM-исключения наследуют `ProviderError`); логирование с `job_id`
+  (contextvar).
 - История показывает «Файл больше недоступен»; исправлено 401-сообщение TTS (Yandex API-ключ).
 
 ### PHASE 7 — Интеграционные тесты и документация

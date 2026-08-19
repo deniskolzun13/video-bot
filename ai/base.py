@@ -1,6 +1,8 @@
 """Интерфейс LLM-провайдера."""
 from abc import ABC, abstractmethod
 
+from utils.errors import ProviderError
+
 
 class LLMProvider(ABC):
     """Единый интерфейс для LLM. Позволяет подключать любые OpenAI-совместимые API,
@@ -18,8 +20,5 @@ class LLMProvider(ABC):
         ...
 
 
-class LLMError(Exception):
-    """Ошибка LLM — понятное сообщение + технические детали."""
-    def __init__(self, message: str, details: str = ""):
-        super().__init__(message)
-        self.details = details
+class LLMError(ProviderError):
+    """Ошибка LLM — понятное сообщение + технические детали (наследует ProviderError)."""

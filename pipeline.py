@@ -21,6 +21,7 @@ from subtitles import (
 )
 from tts import get_word_timestamps, synthesize
 from utils.cleanup import cleanup_dir, remove_tree
+from utils.errors import UserError, ValidationError
 from video.selector import VideoSelector
 from video_source import (
     PexelsProvider,
@@ -69,7 +70,7 @@ async def _build_provider(text: str, settings: dict | None = None):
             logger.info("Видео-источник: Steam, игра «%s»", game)
             return SteamProvider(game)
         if source == "steam":
-            raise ValueError("VIDEO_SOURCE=steam, но не удалось определить игру в тексте")
+            raise UserError("VIDEO_SOURCE=steam, но не удалось определить игру в тексте")
     logger.info("Видео-источник: Pexels")
     return PexelsProvider(config.PEXELS_API_KEY)
 
@@ -130,11 +131,11 @@ async def process_text(
 
     text = text.strip()
     if not text:
-        raise ValueError("Пустой текст")
+        raise UserError("Пустой текст")
 
     parts = split_for_videos(text)
     if len(parts) > config.MAX_PARTS:
-        raise ValueError(
+        raise UserError(
             f"Текст слишком длинный: {len(parts)} частей (максимум {config.MAX_PARTS}). "
             f"Сократи до {config.MAX_VIDEO_SYMBOLS * config.MAX_PARTS} символов."
         )
@@ -202,7 +203,7 @@ async def process_text(
             )
 
             if duration > config.MAX_VIDEO_DURATION:
-                raise ValueError(
+                raise UserError(
                     f"Озвучка длится {duration:.0f} с — больше лимита "
                     f"{config.MAX_VIDEO_DURATION:.0f} с. Сократи текст."
                 )
@@ -285,7 +286,7 @@ async def process_text(
             check = validate_output(out_path, target_w=render_w, target_h=render_h)
             if not check["ok"]:
                 logger.warning("Валидация не пройдена: %s", check["reasons"])
-                raise ValueError(
+                raise ValidationError(
                     "Рендер завершился, но файл повреждён: " + ", ".join(check["reasons"])
                 )
             logger.info("Валидация OK: %s (%.1fс, %s)", out_path.name,
