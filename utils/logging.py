@@ -12,6 +12,7 @@
 import logging
 import logging.config
 import threading
+from contextlib import contextmanager
 from contextvars import ContextVar
 from typing import Iterator
 
@@ -30,6 +31,7 @@ class _CtxStore(threading.local):
         self.ctx = None
 
 
+@contextmanager
 def job_context(job_id: str) -> Iterator[None]:
     """Контекст-менеджер: внутри блока JOB_ID виден всем логгерам."""
     token = JOB_ID.set(job_id or "")
@@ -50,10 +52,9 @@ def setup_logging(level: int = logging.INFO) -> None:
             format="%(asctime)s %(levelname)s %(job_id)s%(name)s: %(message)s",
             datefmt="%H:%M:%S",
         )
-    else:
-        for h in root.handlers:
-            if not any(isinstance(f, JobIdFilter) for f in h.filters):
-                h.addFilter(JobIdFilter())
+    for h in root.handlers:
+        if not any(isinstance(f, JobIdFilter) for f in h.filters):
+            h.addFilter(JobIdFilter())
 
 
 __all__ = ["job_context", "setup_logging", "JOB_ID"]
